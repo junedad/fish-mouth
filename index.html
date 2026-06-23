@@ -68,26 +68,33 @@ const ri = (a, b) => Math.floor(rnd(a, b + 1));
 const pick = a => a[Math.floor(Math.random() * a.length)];
 
 // ===== création d'une créature (génome façon Spore quand auto) =====
-function spawn(x, y, img) {
+// maturité 0 = bébé (petit, gros yeux, peu de pièces) → 1 = adulte (grand, complet)
+function spawn(x, y, opts = {}) {
   const hue = rnd(0, 360);
+  const img = opts.img || null;
+  const size = opts.size ?? (img ? rnd(34, 46) : rnd(26, 52));
+  const mat = opts.maturity ?? rnd(0.3, 0.85);
   fish.push({
     x, y, vx: rnd(-1, 1), vy: rnd(-1, 1),
     heading: rnd(0, Math.PI * 2),
-    speed: rnd(1.1, 2.6),
-    size: img ? rnd(34, 46) : rnd(26, 52),
-    angle: 0, mode: "swim",
-    img: img || null,
+    speed: rnd(1.1, 2.6) + (1 - mat) * 0.8,     // bébés plus frétillants
+    size, angle: 0, mode: "swim",
+    img,
     body: `hsl(${hue} 80% 58%)`,
     belly: `hsl(${hue} 70% 82%)`,
     fin: `hsl(${(hue + 35) % 360} 85% 52%)`,
     mark: `hsl(${(hue + 170) % 360} 75% 65%)`,
     pattern: pick(["stripes", "spots", "plain", "plain"]),
     spots: Array.from({ length: 7 }, () => [rnd(-0.6, 0.7), rnd(-0.5, 0.5)]),
-    // pièces procédurales :
-    eyes: ri(1, 2), spikes: ri(0, 5), horns: ri(0, 2), bellyFins: ri(0, 2),
-    finStyle: pick(["forked", "fan"]),
-    bodyH: rnd(0.66, 1),
-    phase: rnd(0, 10), wiggle: rnd(0.9, 1.6),
+    // pièces procédurales pilotées par la maturité :
+    eyes: mat > 0.62 ? 2 : 1,
+    spikes: Math.round(mat * 5),
+    horns: Math.round(mat * 2),
+    bellyFins: Math.round(mat * 2),
+    finStyle: mat > 0.5 ? "forked" : "fan",
+    eyeR: 0.30 - mat * 0.13,                     // gros yeux quand bébé
+    bodyH: 1 - mat * 0.32,                        // bébés tout ronds
+    phase: rnd(0, 10), wiggle: rnd(0.9, 1.6) + (1 - mat) * 0.5,
     turn: 0, nextTurn: 0, scale: 0.1, blink: 0,
   });
   if (fish.length > MAX) fish.shift();
@@ -231,10 +238,10 @@ function drawFish(f, t) {
       ctx.moveTo(s * (0.3 + dx), -s * 0.35 * h);
       ctx.lineTo(s * (0.32 + dx), -s * 0.78 * h);
       ctx.stroke();
-      drawEye(s * (0.32 + dx), -s * 0.85 * h, s * 0.14);
+      drawEye(s * (0.32 + dx), -s * 0.85 * h, s * f.eyeR * 0.8);
     }
   } else {
-    drawEye(s * 0.55, -s * 0.2 * h, s * 0.18);
+    drawEye(s * 0.55, -s * 0.2 * h, s * f.eyeR);
   }
 
   // sourire
@@ -279,7 +286,7 @@ function step(f, t) {
 
 // ===== feedback détection visages =====
 let faces = [];
-function drawFaces() {
+function drawFaces(t) {
   for (let i = 0; i < faces.length; i++) {
     const fc = faces[i];
     ctx.save();
@@ -292,13 +299,21 @@ function drawFaces() {
     ctx.fillStyle = fc.open ? "rgba(120,255,170,.9)" : "rgba(120,200,255,.7)";
     ctx.font = "13px sans-serif";
     ctx.fillText("Humain " + (i + 1), fc.x + 6, fc.y - 6);
+    // œuf en croissance dans la bouche
+    if (fc.egg) {
+      const r = fc.egg.r * (1 + Math.sin(t * 0.012) * 0.06);
+      ctx.fillStyle = "rgba(255,255,255,.22)";
+      ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(255,240,180,.85)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
+    }
     ctx.restore();
   }
 }
 
 function loop(t) {
   ctx.clearRect(0, 0, cv.width, cv.height);
-  drawFaces();
+  drawFaces(t);
   for (const f of fish) { step(f, t); drawFish(f, t); }
   requestAnimationFrame(loop);
 }
@@ -366,8 +381,11 @@ document.getElementById("release").onclick = () => {
   modal.classList.remove("on");
 };
 
-// ===== détection bouche (2 visages) =====
+// ===== détection bouche (2 visages) + couvaison =====
+// bouche ouverte = un œuf grossit (vite si grande ouverture) ; fermeture = éclosion.
 const wasOpen = [];
+const egg = [];      // {x,y,growth} par visage tant que la bouche est ouverte
+const GROW = 6, MAXR = 78;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
 mesh.setOptions({ maxNumFaces: 2, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
 mesh.onResults(r => {
@@ -380,17 +398,31 @@ mesh.onResults(r => {
       if (sx < minX) minX = sx; if (sx > maxX) maxX = sx;
       if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
     }
-    const open = Math.abs(lm[13].y - lm[14].y) / Math.abs(lm[10].y - lm[152].y);
-    const isOpen = open > 0.12;
-    if (isOpen && !wasOpen[i]) {                // front montant = 1 créature
-      const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
-      const my = (lm[13].y + lm[14].y) / 2 * cv.height;
-      spawn(mx, my);
+    const ratio = Math.abs(lm[13].y - lm[14].y) / Math.abs(lm[10].y - lm[152].y);
+    const isOpen = ratio > 0.12;
+    const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
+    const my = (lm[13].y + lm[14].y) / 2 * cv.height;
+
+    if (isOpen) {
+      if (!egg[i]) egg[i] = { x: mx, y: my, growth: 0 };
+      egg[i].growth += ratio;                   // plus la bouche est grande, plus ça grossit vite
+      egg[i].x = mx; egg[i].y = my;
+    } else if (wasOpen[i] && egg[i]) {          // éclosion
+      const size = Math.max(16, Math.min(MAXR, 16 + egg[i].growth * GROW));
+      spawn(egg[i].x, egg[i].y, { size, maturity: (size - 16) / (MAXR - 16) });
+      egg[i] = null;
     }
     wasOpen[i] = isOpen;
-    return { x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height, open: isOpen };
+
+    const er = egg[i] ? Math.min(MAXR, 16 + egg[i].growth * GROW) : 0;
+    return {
+      x: minX * cv.width, y: minY * cv.height,
+      w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height,
+      open: isOpen,
+      egg: egg[i] ? { x: egg[i].x, y: egg[i].y, r: er } : null,
+    };
   });
-  wasOpen.length = list.length;
+  wasOpen.length = egg.length = list.length;
 });
 
 (async () => {
