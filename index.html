@@ -1,18 +1,18 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Poissons & bouche</title>
+<title>Aquarium de la bouche</title>
 <style>
   body { margin: 0; background: #02141f; overflow: hidden; font-family: sans-serif; }
   #wrap { position: fixed; inset: 0; }
   video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  video { transform: scaleX(-1); opacity: .35; }
+  video { transform: scaleX(-1); opacity: .3; }
   #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; }
 </style>
 <div id="wrap">
   <video id="vid" autoplay playsinline muted></video>
   <canvas id="cv"></canvas>
 </div>
-<div id="msg">Ouvre la bouche…</div>
+<div id="msg">Ouvre la bouche pour libérer un poisson…</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 <script>
@@ -21,82 +21,184 @@ const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 const msg = document.getElementById("msg");
 const fish = [];
+const MAX = 20; // ponytail: plafond simple, retire le plus vieux au-delà
 
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener("resize", resize); resize();
 
+const rnd = (a, b) => a + Math.random() * (b - a);
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
 function spawn(x, y) {
-  const hue = Math.random() * 360;
+  const hue = rnd(0, 360);
   fish.push({
     x, y,
-    vx: (Math.random() - .5) * 3 - 1.5,        // dérive vers la gauche
-    vy: (Math.random() - .5) * 2,
-    size: 18 + Math.random() * 30,
-    color: `hsl(${hue} 80% 60%)`,
-    fins: 0.4 + Math.random() * 0.5,           // forme aléatoire (longueur queue)
-    body: 0.5 + Math.random() * 0.6,           // rondeur aléatoire
-    life: 1,
+    angle: rnd(0, Math.PI * 2),
+    speed: rnd(1.1, 2.6),
+    size: rnd(26, 54),
+    body: `hsl(${hue} 80% 58%)`,
+    belly: `hsl(${hue} 70% 80%)`,
+    fin: `hsl(${(hue + 35) % 360} 85% 50%)`,
+    pattern: pick(["stripes", "spots", "plain", "plain"]),
+    mark: `hsl(${(hue + 180) % 360} 75% 65%)`,
+    spots: Array.from({ length: 7 }, () => [rnd(-0.6, 0.7), rnd(-0.5, 0.5)]),
+    phase: rnd(0, 10),
+    wiggle: rnd(0.9, 1.6),
+    turn: 0,
+    nextTurn: 0,
+    scale: 0.1,
+    blink: 0,
   });
+  if (fish.length > MAX) fish.shift();
 }
 
-function drawFish(f) {
+// trace le contour du corps (museau vers +x) — réutilisé pour remplir ET découper
+function bodyPath(s) {
+  ctx.beginPath();
+  ctx.moveTo(s, 0);
+  ctx.quadraticCurveTo(s * 0.3, -s * 0.78, -s * 0.78, -s * 0.18);
+  ctx.quadraticCurveTo(-s * 1.02, 0, -s * 0.78, s * 0.18);
+  ctx.quadraticCurveTo(s * 0.3, s * 0.78, s, 0);
+  ctx.closePath();
+}
+
+function drawFish(f, t) {
+  const s = f.size;
+  const facingLeft = Math.cos(f.angle) < 0;
+  const wig = Math.sin(t * 0.006 * f.speed + f.phase) * f.wiggle;
+
   ctx.save();
   ctx.translate(f.x, f.y);
-  ctx.rotate(Math.atan2(f.vy, f.vx) + (f.vx < 0 ? Math.PI : 0));
-  ctx.scale(f.vx < 0 ? -1 : 1, 1);
-  ctx.globalAlpha = Math.min(1, f.life);
-  ctx.fillStyle = f.color;
+  ctx.rotate(f.angle);
+  if (facingLeft) ctx.scale(1, -1); // garde le poisson à l'endroit
+  ctx.scale(f.scale, f.scale);      // petite anim d'apparition
+
+  // queue ondulante
+  const ty = wig * s * 0.45;
+  ctx.fillStyle = f.fin;
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.75, 0);
+  ctx.quadraticCurveTo(-s * 1.5, ty - s * 0.7, -s * 1.75, ty - s * 0.55);
+  ctx.quadraticCurveTo(-s * 1.25, ty, -s * 1.75, ty + s * 0.55);
+  ctx.quadraticCurveTo(-s * 1.5, ty + s * 0.7, -s * 0.75, 0);
+  ctx.fill();
+
+  // nageoire dorsale
+  ctx.beginPath();
+  ctx.moveTo(-s * 0.25, -s * 0.5);
+  ctx.quadraticCurveTo(-s * 0.1, -s * 1.05, s * 0.45, -s * 0.42);
+  ctx.fill();
+
   // corps
-  ctx.beginPath();
-  ctx.ellipse(0, 0, f.size, f.size * f.body, 0, 0, Math.PI * 2);
+  ctx.fillStyle = f.body;
+  bodyPath(s);
   ctx.fill();
-  // queue
+
+  // ventre clair
+  ctx.fillStyle = f.belly;
   ctx.beginPath();
-  ctx.moveTo(-f.size, 0);
-  ctx.lineTo(-f.size * (1 + f.fins), -f.size * f.fins);
-  ctx.lineTo(-f.size * (1 + f.fins), f.size * f.fins);
-  ctx.closePath();
+  ctx.moveTo(s * 0.85, s * 0.05);
+  ctx.quadraticCurveTo(s * 0.2, s * 0.7, -s * 0.7, s * 0.18);
+  ctx.quadraticCurveTo(-s * 0.2, s * 0.3, s * 0.85, s * 0.05);
   ctx.fill();
-  // œil
+
+  // motifs (découpés dans le corps)
+  if (f.pattern !== "plain") {
+    ctx.save();
+    bodyPath(s); ctx.clip();
+    ctx.fillStyle = f.mark;
+    if (f.pattern === "stripes") {
+      for (let i = -1; i <= 2; i++) {
+        ctx.beginPath();
+        ctx.ellipse(s * (0.1 - i * 0.4), 0, s * 0.12, s, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    } else {
+      for (const [sx, sy] of f.spots) {
+        ctx.beginPath();
+        ctx.arc(s * sx, s * sy, s * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  // nageoire pectorale
+  ctx.fillStyle = f.fin;
+  ctx.beginPath();
+  ctx.moveTo(s * 0.15, s * 0.1);
+  ctx.quadraticCurveTo(-s * 0.1, s * 0.6 + ty * 0.3, s * 0.45, s * 0.35);
+  ctx.fill();
+
+  // œil cartoon
+  const blinking = f.blink > 0;
   ctx.fillStyle = "#fff";
-  ctx.beginPath(); ctx.arc(f.size * .5, -f.size * .2, f.size * .12, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#000";
-  ctx.beginPath(); ctx.arc(f.size * .55, -f.size * .2, f.size * .06, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(s * 0.55, -s * 0.2, s * 0.18, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#0a0a14";
+  if (blinking) {
+    ctx.lineWidth = s * 0.05; ctx.strokeStyle = "#0a0a14";
+    ctx.beginPath(); ctx.moveTo(s * 0.42, -s * 0.2); ctx.lineTo(s * 0.68, -s * 0.2); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(s * 0.6, -s * 0.2, s * 0.09, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(s * 0.63, -s * 0.23, s * 0.03, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // sourire
+  ctx.strokeStyle = "#0a0a14";
+  ctx.lineWidth = s * 0.05;
+  ctx.beginPath();
+  ctx.arc(s * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3);
+  ctx.stroke();
+
   ctx.restore();
 }
 
-function loop() {
+function step(f, t) {
+  // errance douce : change de cap de temps en temps
+  if (t > f.nextTurn) { f.turn = rnd(-0.5, 0.5); f.nextTurn = t + rnd(400, 1400); }
+  f.angle += f.turn * 0.01;
+
+  let vx = Math.cos(f.angle) * f.speed;
+  let vy = Math.sin(f.angle) * f.speed;
+  f.x += vx; f.y += vy;
+
+  // rebond sur les bords de l'aquarium
+  const m = f.size * 1.2;
+  if (f.x < m && vx < 0) f.angle = Math.PI - f.angle;
+  if (f.x > cv.width - m && vx > 0) f.angle = Math.PI - f.angle;
+  if (f.y < m && vy < 0) f.angle = -f.angle;
+  if (f.y > cv.height - m && vy > 0) f.angle = -f.angle;
+  f.x = Math.max(m, Math.min(cv.width - m, f.x));
+  f.y = Math.max(m, Math.min(cv.height - m, f.y));
+
+  if (f.scale < 1) f.scale = Math.min(1, f.scale + 0.04);
+  f.blink = f.blink > 0 ? f.blink - 1 : (Math.random() < 0.004 ? 8 : 0);
+}
+
+function loop(t) {
   ctx.clearRect(0, 0, cv.width, cv.height);
-  for (let i = fish.length - 1; i >= 0; i--) {
-    const f = fish[i];
-    f.x += f.vx; f.y += f.vy;
-    f.life -= 0.004;
-    if (f.life <= 0 || f.x < -100 || f.x > cv.width + 100) { fish.splice(i, 1); continue; }
-    drawFish(f);
-  }
+  for (const f of fish) { step(f, t); drawFish(f, t); }
   requestAnimationFrame(loop);
 }
-loop();
+requestAnimationFrame(loop);
 
-// --- détection bouche ---
-let cooldown = 0;
+// --- détection bouche : un poisson par ouverture ---
+let mouthWasOpen = false;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
 mesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
 mesh.onResults(r => {
-  cooldown--;
-  if (!r.multiFaceLandmarks?.length) return;
+  if (!r.multiFaceLandmarks?.length) { mouthWasOpen = false; return; }
   const lm = r.multiFaceLandmarks[0];
-  // ouverture = distance lèvres / hauteur du visage (normalise selon la distance caméra)
-  const open = Math.abs(lm[13].y - lm[14].y);
-  const faceH = Math.abs(lm[10].y - lm[152].y);
+  const open = Math.abs(lm[13].y - lm[14].y) / Math.abs(lm[10].y - lm[152].y);
   msg.style.display = "none";
-  if (open / faceH > 0.12 && cooldown <= 0) {
-    // bouche à l'écran (miroir horizontal comme la vidéo)
+  const isOpen = open > 0.12;
+  if (isOpen && !mouthWasOpen) {            // front montant = 1 seul poisson
     const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
     const my = (lm[13].y + lm[14].y) / 2 * cv.height;
-    for (let k = 0; k < 3; k++) spawn(mx, my);
-    cooldown = 6; // évite un flot continu tant que la bouche reste ouverte
+    spawn(mx, my);
   }
+  mouthWasOpen = isOpen;
 });
 
 (async () => {
