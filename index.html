@@ -1,462 +1,382 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Aquarium de la bouche</title>
+<title>Aquarium 3D de la bouche</title>
 <style>
   body { margin: 0; background: #02141f; overflow: hidden; font-family: sans-serif; touch-action: none; }
   #wrap { position: fixed; inset: 0; }
-  video, #cv { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  video { transform: scaleX(-1); opacity: .28; }
-  #cv { cursor: grab; }
-  #cv.grabbing { cursor: grabbing; }
-  #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; pointer-events: none; }
-  #draw-btn { position: fixed; top: 12px; right: 12px; z-index: 5; border: 0; border-radius: 999px;
-    padding: 10px 16px; font-size: 15px; font-weight: 600; cursor: pointer; color: #02141f;
-    background: linear-gradient(135deg, #ffe16b, #ff8fb1); box-shadow: 0 4px 14px #0006; }
-
-  #modal { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
-    background: #02141fcc; backdrop-filter: blur(3px); }
-  #modal.on { display: flex; }
-  #panel { background: #0c2433; padding: 18px; border-radius: 16px; box-shadow: 0 10px 40px #000a; }
-  #panel h2 { margin: 0 0 4px; color: #fff; font-size: 17px; }
-  #panel p { margin: 0 0 10px; color: #8fb6c9; font-size: 13px; }
-  #pad { background: #fff; border-radius: 10px; touch-action: none; display: block; }
-  .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
-  .sw { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff3; cursor: pointer; }
-  .sw.sel { border-color: #fff; transform: scale(1.15); }
-  .btn { border: 0; border-radius: 8px; padding: 9px 14px; font-weight: 600; cursor: pointer; }
-  .btn.ghost { background: #1d3d4f; color: #cfe6f0; }
-  .btn.go { background: linear-gradient(135deg, #6bffa1, #6bd0ff); color: #02141f; margin-left: auto; }
+  #vid, #three, #hud { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #vid { object-fit: cover; transform: scaleX(-1); opacity: .25; }
+  #three { cursor: grab; }
+  #three.grabbing { cursor: grabbing; }
+  #hud { pointer-events: none; }
+  #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; pointer-events: none; z-index: 5; }
 </style>
 
 <div id="wrap">
   <video id="vid" autoplay playsinline muted></video>
-  <canvas id="cv"></canvas>
+  <canvas id="three"></canvas>
+  <canvas id="hud"></canvas>
 </div>
-<div id="msg">Ouvre la bouche pour pondre une créature… attrape-les à la souris, et laisse-les se rencontrer 💞</div>
-<button id="draw-btn">🎨 Dessine ton poisson</button>
-
-<div id="modal">
-  <div id="panel">
-    <h2>Dessine ton poisson</h2>
-    <p>Dessine-le tourné vers la droite ➜, puis lâche-le dans l'aquarium.</p>
-    <canvas id="pad" width="360" height="240"></canvas>
-    <div class="row" id="swatches"></div>
-    <div class="row">
-      <button class="btn ghost" id="erase">Gomme</button>
-      <button class="btn ghost" id="clear">Effacer</button>
-      <button class="btn ghost" id="cancel">Annuler</button>
-      <button class="btn go" id="release">Lâcher dans l'aquarium 🐟</button>
-    </div>
-  </div>
-</div>
+<div id="msg">Ouvre la bouche pour pondre une créature 3D… attrape-les, et laisse-les se rencontrer 💞</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
-<script>
-const vid = document.getElementById("vid");
-const cv = document.getElementById("cv");
-const ctx = cv.getContext("2d");
-const msg = document.getElementById("msg");
-const fish = [];
-const hearts = [];
-const MAX = 26; // ponytail: plafond simple, retire le plus vieux au-delà
+<script type="module">
+import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
 
-function resize() { cv.width = innerWidth; cv.height = innerHeight; }
-addEventListener("resize", resize); resize();
+const vid = document.getElementById("vid");
+const hud = document.getElementById("hud");
+const hctx = hud.getContext("2d");
+const msg = document.getElementById("msg");
+const MAX = 18;
 
 const rnd = (a, b) => a + Math.random() * (b - a);
 const ri = (a, b) => Math.floor(rnd(a, b + 1));
 const pick = a => a[Math.floor(Math.random() * a.length)];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
-// mélange circulaire de teintes (chemin le plus court)
 const blendHue = (a, b) => { const d = ((b - a + 540) % 360) - 180; return (a + d * rnd(0.35, 0.65) + rnd(-12, 12) + 360) % 360; };
 const blend = (a, b, m) => a + (b - a) * rnd(0.35, 0.65) + rnd(-m, m);
 
-// ===== formes de corps (museau vers +x) =====
-const SHAPES = {
-  normal:   { lx: 1.00, hy: 1.00, back: 0.78 },
-  long:     { lx: 1.55, hy: 0.60, back: 0.92 }, // anguille
-  round:    { lx: 0.82, hy: 1.20, back: 1.02 }, // poisson-globe
-  flat:     { lx: 0.80, hy: 1.34, back: 0.96 }, // poisson-disque
-  teardrop: { lx: 1.12, hy: 0.94, back: 0.70 },
-};
-function geo(s, g) {
-  const P = SHAPES[g.bodyShape] || SHAPES.normal;
-  return { L: s * P.lx, top: s * 0.78 * g.bodyH * P.hy, rear: -s * P.lx * P.back };
-}
-function bodyPath(s, g) {
-  const { L, top, rear } = geo(s, g);
-  ctx.beginPath();
-  ctx.moveTo(L, 0);
-  ctx.quadraticCurveTo(L * 0.32, -top, rear, -top * 0.28);
-  ctx.quadraticCurveTo(rear - s * 0.18, 0, rear, top * 0.28);
-  ctx.quadraticCurveTo(L * 0.32, top, L, 0);
-  ctx.closePath();
-}
+// ===================== Three.js : scène / caméra / lumières =====================
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("three"), alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x02141f, 70, 150); // profondeur
+const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 400);
+camera.position.set(0, 0, 72);
 
-// ===== génome (héritable) =====
-// baseHue : gamme de couleur de l'humain qui l'a pondu (optionnel)
+scene.add(new THREE.AmbientLight(0x556677, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 1.0); key.position.set(-30, 50, 60); scene.add(key);
+const rim = new THREE.DirectionalLight(0x66ccff, 0.5); rim.position.set(40, -20, -30); scene.add(rim);
+
+let bounds = new THREE.Vector3();
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h); hud.width = w; hud.height = h;
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  const halfH = Math.tan(camera.fov * Math.PI / 360) * camera.position.z;
+  bounds.set(halfH * camera.aspect * 0.86, halfH * 0.86, 22); // demi-volume nageable
+}
+addEventListener("resize", resize); resize();
+
+// projette un point écran (px) sur le plan z=0 du monde
+function screenToWorld(px, py) {
+  const v = new THREE.Vector3((px / innerWidth) * 2 - 1, -(py / innerHeight) * 2 + 1, 0.5).unproject(camera);
+  const dir = v.sub(camera.position).normalize();
+  return camera.position.clone().add(dir.multiplyScalar(-camera.position.z / dir.z));
+}
+const toScreen = v => { const p = v.clone().project(camera); return [(p.x * 0.5 + 0.5) * innerWidth, (-p.y * 0.5 + 0.5) * innerHeight]; };
+
+// ===================== génome (héritable) =====================
 function randomGenome(baseHue) {
   const hue = baseHue == null ? rnd(0, 360) : (baseHue + rnd(-22, 22) + 360) % 360;
   return {
     hue, finHue: (hue + ri(20, 80)) % 360, markHue: (hue + ri(140, 200)) % 360,
     bodyShape: pick(["normal", "long", "round", "flat", "teardrop"]),
-    bodyH: rnd(0.72, 1.06),
+    bodyH: rnd(0.78, 1.12),
     tail: pick(["forked", "fan", "round", "pointy"]),
     dorsal: pick(["spikes", "spikes", "sail", "none"]),
-    spikes: ri(2, 6), sailH: rnd(0.8, 1.4),
+    spikes: ri(3, 6), sailH: rnd(0.9, 1.5),
     horns: ri(0, 2), bellyFins: ri(0, 2),
-    eyes: Math.random() < 0.4 ? 2 : 1, eyeR: rnd(0.16, 0.30),
+    eyes: Math.random() < 0.4 ? 2 : 1, eyeR: rnd(0.18, 0.32),
     snout: pick(["none", "none", "beak", "whiskers"]),
-    pattern: pick(["stripes", "spots", "plain", "plain"]),
-    spotN: ri(4, 8),
+    pattern: pick(["stripes", "spots", "plain"]),
+    spotN: ri(5, 11),
   };
 }
-// croisement papa × maman
 function crossover(A, B) {
   const g = {};
   for (const k of ["bodyShape", "tail", "dorsal", "snout", "pattern", "eyes"]) g[k] = Math.random() < 0.5 ? A[k] : B[k];
   for (const k of ["spikes", "horns", "bellyFins", "spotN"]) g[k] = Math.max(0, (Math.random() < 0.5 ? A[k] : B[k]) + (Math.random() < 0.18 ? ri(-1, 1) : 0));
   g.hue = blendHue(A.hue, B.hue);
-  g.finHue = (g.hue + ri(20, 80)) % 360;
-  g.markHue = (g.hue + ri(140, 200)) % 360;
-  g.bodyH = clamp(blend(A.bodyH, B.bodyH, 0.05), 0.6, 1.15);
-  g.eyeR = clamp(blend(A.eyeR, B.eyeR, 0.02), 0.15, 0.32);
+  g.finHue = (g.hue + ri(20, 80)) % 360; g.markHue = (g.hue + ri(140, 200)) % 360;
+  g.bodyH = clamp(blend(A.bodyH, B.bodyH, 0.05), 0.7, 1.15);
+  g.eyeR = clamp(blend(A.eyeR, B.eyeR, 0.02), 0.16, 0.34);
   g.sailH = blend(A.sailH, B.sailH, 0.1);
   return g;
 }
 
-// ===== naissance =====
-function spawn(x, y, opts = {}) {
-  const img = opts.img || null;
-  const g = img ? null : (opts.genome || randomGenome());
-  const size = opts.size ?? (img ? rnd(36, 48) : rnd(26, 52));
-  const baby = !!opts.baby;
-  fish.push({
-    x, y, vx: rnd(-1, 1), vy: rnd(-1, 1),
-    heading: rnd(0, Math.PI * 2), speed: rnd(1.1, 2.4) + (baby ? 1 : 0),
-    size, grow: baby ? 0.14 : 0.18, baby, img, g,
-    spots: g ? Array.from({ length: g.spotN }, () => [rnd(-0.55, 0.7), rnd(-0.5, 0.5)]) : null,
-    angle: 0, mode: "swim", alpha: 1,
-    age: 0, life: img ? Infinity : rnd(48000, 95000), mateCd: baby ? 11000 : 3500,
-    phase: rnd(0, 10), wiggle: rnd(0.9, 1.5) + (baby ? 0.5 : 0),
-    turn: 0, nextTurn: 0, blink: 0,
-  });
-  if (fish.length > MAX) fish.shift();
+// ===================== construction d'une créature 3D (style Spore) =====================
+const SH = { // proportions du corps : demi-longueur z, largeur x, hauteur y
+  normal:   { len: 1.45, hx: 0.72, hy: 0.88 },
+  long:     { len: 2.30, hx: 0.42, hy: 0.50 },
+  round:    { len: 1.10, hx: 1.00, hy: 1.05 },
+  flat:     { len: 1.25, hx: 0.40, hy: 1.30 },
+  teardrop: { len: 1.55, hx: 0.74, hy: 0.80 },
+};
+const SPHERE = new THREE.SphereGeometry(1, 24, 18);
+
+function finGeo(w, h) {
+  const s = new THREE.Shape();
+  s.moveTo(0, -h * 0.28);
+  s.quadraticCurveTo(w * 0.6, -h * 0.55, w, -h * 0.12);
+  s.quadraticCurveTo(w * 0.82, 0, w, h * 0.12);
+  s.quadraticCurveTo(w * 0.6, h * 0.55, 0, h * 0.28);
+  s.lineTo(0, -h * 0.28);
+  return new THREE.ShapeGeometry(s);
+}
+function bodyTexture(g) {
+  const c = document.createElement("canvas"); c.width = 128; c.height = 64;
+  const x = c.getContext("2d");
+  x.fillStyle = `hsl(${g.hue} 72% 52%)`; x.fillRect(0, 0, 128, 64);
+  // contre-ombrage : ventre plus clair
+  const grad = x.createLinearGradient(0, 0, 0, 64);
+  grad.addColorStop(0, `hsl(${g.hue} 75% 40%)`); grad.addColorStop(1, `hsl(${g.hue} 65% 80%)`);
+  x.fillStyle = grad; x.globalAlpha = 0.55; x.fillRect(0, 0, 128, 64); x.globalAlpha = 1;
+  x.fillStyle = `hsl(${g.markHue} 70% 50%)`;
+  if (g.pattern === "stripes") { for (let i = 0; i < 7; i++) { x.fillRect(8 + i * 18, 0, 7, 64); } }
+  else if (g.pattern === "spots") { for (let i = 0; i < g.spotN; i++) { x.beginPath(); x.arc(rnd(0, 128), rnd(0, 64), rnd(3, 6), 0, 7); x.fill(); } }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; return tex;
 }
 
-// ===== dessin d'un poisson (fausse 3D : dégradés + foreshortening) =====
-function drawFish(f, t) {
-  const s = f.size * f.grow;
-  const facingLeft = Math.cos(f.angle) < 0;
-  const wig = Math.sin(t * 0.006 * f.speed + f.phase) * f.wiggle;
-  ctx.save();
-  ctx.globalAlpha = f.alpha;
-  ctx.translate(f.x, f.y);
-  ctx.rotate(f.angle);
-  if (facingLeft) ctx.scale(1, -1);
-  const yaw = 0.84 + 0.16 * Math.sin(t * 0.0026 + f.phase); // le corps tourne dans la profondeur
-  ctx.scale(yaw, 1);
+function buildCreature(g, S) {
+  const sh = SH[g.bodyShape], dx = S * sh.hx, dy = S * sh.hy * g.bodyH, dz = S * sh.len;
+  const group = new THREE.Group();
+  const mats = [];
+  const bodyMat = new THREE.MeshStandardMaterial({ map: bodyTexture(g), roughness: 0.55, metalness: 0.05 });
+  const finCol = new THREE.Color(`hsl(${g.finHue}, 80%, 55%)`);
+  const finMat = new THREE.MeshStandardMaterial({ color: finCol, roughness: 0.5, side: THREE.DoubleSide });
+  const hornMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(`hsl(${g.finHue}, 80%, 45%)`), roughness: 0.5 });
+  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
+  const darkMat = new THREE.MeshStandardMaterial({ color: 0x0a0a14, roughness: 0.3 });
+  mats.push(bodyMat, finMat, hornMat, whiteMat, darkMat);
 
-  if (f.img) {
-    const iw = f.img.width, ih = f.img.height, k = (s * 2.6) / Math.max(iw, ih);
-    ctx.rotate(wig * 0.05);
-    ctx.drawImage(f.img, -iw * k / 2, -ih * k / 2, iw * k, ih * k);
-    ctx.restore(); return;
-  }
+  // corps
+  const body = new THREE.Mesh(SPHERE, bodyMat); body.scale.set(dx, dy, dz); group.add(body);
 
-  const g = f.g, hue = g.hue;
-  const { L, top, rear } = geo(s, g);
-  const ty = wig * s * 0.45;
-  const cLight = `hsl(${hue} 92% 74%)`, cMid = `hsl(${hue} 82% 55%)`, cDark = `hsl(${hue} 72% 32%)`;
-  const cLine = `hsl(${hue} 70% 22%)`;
-  const fg = ctx.createLinearGradient(rear, -s, rear - s * 1.2, s);
-  fg.addColorStop(0, `hsl(${g.finHue} 88% 66%)`); fg.addColorStop(1, `hsl(${g.finHue} 82% 36%)`);
-  const fin = draw => { ctx.fillStyle = fg; ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.035; ctx.lineJoin = "round"; draw(); ctx.fill(); ctx.stroke(); };
-  const topEdge = x => -top * Math.sqrt(Math.max(0, 1 - (x / L) ** 2));
-  const E = s * 0.95;
+  const fin = (geo, mat = finMat) => new THREE.Mesh(geo, mat);
 
-  // --- queue ---
-  fin(() => {
-    ctx.beginPath(); ctx.moveTo(rear, 0);
-    if (g.tail === "forked") {
-      ctx.quadraticCurveTo(rear - 0.7 * E, ty - s * 0.7, rear - E, ty - s * 0.55);
-      ctx.quadraticCurveTo(rear - 0.45 * E, ty, rear - E, ty + s * 0.55);
-      ctx.quadraticCurveTo(rear - 0.7 * E, ty + s * 0.7, rear, 0);
-    } else if (g.tail === "fan") {
-      ctx.quadraticCurveTo(rear - 0.65 * E, ty - s * 0.9, rear - E, ty - s * 0.2);
-      ctx.quadraticCurveTo(rear - 1.05 * E, ty, rear - E, ty + s * 0.2);
-      ctx.quadraticCurveTo(rear - 0.65 * E, ty + s * 0.9, rear, 0);
-    } else if (g.tail === "round") {
-      ctx.quadraticCurveTo(rear - E, ty - s * 0.62, rear - E, ty);
-      ctx.quadraticCurveTo(rear - E, ty + s * 0.62, rear, 0);
-    } else { // pointy
-      ctx.lineTo(rear - E, ty - s * 0.12); ctx.lineTo(rear - E * 0.9, ty + s * 0.45); ctx.closePath();
-    }
-  });
+  // queue (pivot qui ondule)
+  const tailPivot = new THREE.Group(); tailPivot.position.set(0, 0, -dz * 0.95); group.add(tailPivot);
+  const tw = S * (g.tail === "fan" ? 1.9 : g.tail === "long" ? 2.1 : 1.5);
+  const th = S * (g.tail === "round" ? 1.4 : g.tail === "pointy" ? 0.9 : 1.5);
+  const tail = fin(finGeo(tw, th)); tail.rotation.y = Math.PI / 2; tailPivot.add(tail);
 
-  // --- dorsale ---
-  if (g.dorsal === "spikes") {
+  // dorsale
+  if (g.dorsal === "sail") {
+    const d = fin(finGeo(dz * 1.1, dy * 1.4 * g.sailH)); d.rotation.y = -Math.PI / 2; d.position.set(0, dy * 0.8, -dz * 0.05); group.add(d);
+  } else if (g.dorsal === "spikes") {
     for (let i = 0; i < g.spikes; i++) {
-      const x = -s * 0.35 + (i / Math.max(1, g.spikes - 1)) * s * 0.75;
-      const te = topEdge(x);
-      fin(() => { ctx.beginPath(); ctx.moveTo(x - s * 0.08, te + s * 0.05); ctx.lineTo(x, te - s * 0.45 * g.bodyH); ctx.lineTo(x + s * 0.08, te + s * 0.05); ctx.closePath(); });
-    }
-  } else if (g.dorsal === "sail") {
-    fin(() => { ctx.beginPath(); ctx.moveTo(rear * 0.55, topEdge(rear * 0.55)); ctx.quadraticCurveTo(0, topEdge(0) - top * 1.1 * g.sailH, L * 0.45, topEdge(L * 0.45)); ctx.closePath(); });
-  }
-
-  // --- corps : volume 3D + ombre ---
-  const bg = ctx.createRadialGradient(0, -top * 0.5, s * 0.05, 0, 0, L * 1.35);
-  bg.addColorStop(0, cLight); bg.addColorStop(0.55, cMid); bg.addColorStop(1, cDark);
-  ctx.save();
-  ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = s * 0.5; ctx.shadowOffsetY = s * 0.14;
-  ctx.fillStyle = bg; bodyPath(s, g); ctx.fill();
-  ctx.restore();
-  ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.04; bodyPath(s, g); ctx.stroke();
-
-  // --- détails clippés dans le corps ---
-  ctx.save(); bodyPath(s, g); ctx.clip();
-  const blg = ctx.createLinearGradient(0, -top * 0.1, 0, top);
-  blg.addColorStop(0, "rgba(255,255,255,0)"); blg.addColorStop(1, `hsl(${hue} 70% 90%)`);
-  ctx.fillStyle = blg; bodyPath(s, g); ctx.fill();
-  if (g.pattern !== "plain") {
-    ctx.fillStyle = `hsl(${g.markHue} 70% 48% / .55)`;
-    if (g.pattern === "stripes") {
-      for (let i = -1; i <= 3; i++) { ctx.beginPath(); ctx.ellipse(L * (0.3 - i * 0.32), 0, s * 0.12, top * 1.6, 0, 0, Math.PI * 2); ctx.fill(); }
-    } else {
-      for (const [sx, sy] of f.spots) { ctx.beginPath(); ctx.arc(L * sx, top * sy, s * 0.11, 0, Math.PI * 2); ctx.fill(); }
+      const z = -dz * 0.35 + (i / (g.spikes - 1)) * dz * 0.75;
+      const yTop = dy * Math.sqrt(Math.max(0, 1 - (z / dz) ** 2));
+      const sp = fin(new THREE.ConeGeometry(S * 0.12, S * 0.6, 6), hornMat);
+      sp.position.set(0, yTop * 0.95, z); group.add(sp);
     }
   }
-  ctx.fillStyle = "rgba(255,255,255,.32)"; // reflet spéculaire
-  ctx.beginPath(); ctx.ellipse(L * 0.15, -top * 0.5, L * 0.5, top * 0.22, -0.35, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
 
-  // --- nageoires avant + ventrales ---
-  fin(() => { ctx.beginPath(); ctx.moveTo(L * 0.15, top * 0.15); ctx.quadraticCurveTo(-s * 0.1, top * 0.85 + ty * 0.3, L * 0.45, top * 0.5); ctx.closePath(); });
+  // nageoires pectorales (2, symétriques, battent)
+  const pecs = [];
+  for (const side of [1, -1]) {
+    const p = fin(finGeo(S * 1.1, S * 0.7));
+    p.rotation.x = Math.PI / 2; p.rotation.y = side * 0.5;
+    p.position.set(side * dx * 0.85, -dy * 0.1, dz * 0.25);
+    p.scale.x = side; group.add(p); pecs.push({ m: p, base: p.rotation.z, side });
+  }
+  // nageoires ventrales
   for (let i = 0; i < g.bellyFins; i++) {
-    const px = -s * 0.1 - i * s * 0.35;
-    fin(() => { ctx.beginPath(); ctx.moveTo(px, top * 0.3); ctx.quadraticCurveTo(px - s * 0.1, top * 0.95 + ty * 0.2, px + s * 0.2, top * 0.65); ctx.closePath(); });
-  }
-
-  // --- museau caractéristique ---
-  if (g.snout === "beak") {
-    fin(() => { ctx.beginPath(); ctx.moveTo(L * 0.92, -s * 0.06); ctx.lineTo(L * 1.18, 0); ctx.lineTo(L * 0.92, s * 0.12); ctx.closePath(); });
-  } else if (g.snout === "whiskers") {
-    ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.04; ctx.lineCap = "round";
-    for (const d of [0, 1]) { ctx.beginPath(); ctx.moveTo(L * 0.85, s * 0.06); ctx.quadraticCurveTo(L * 1.1, s * (0.2 + d * 0.18), L * 1.25, s * (0.35 + d * 0.25)); ctx.stroke(); }
-  }
-
-  // --- cornes ---
-  ctx.strokeStyle = `hsl(${g.finHue} 80% 48%)`; ctx.lineWidth = s * 0.08; ctx.lineCap = "round";
-  for (let i = 0; i < g.horns; i++) {
-    const hx = L * (0.42 - i * 0.2);
-    ctx.beginPath(); ctx.moveTo(hx, topEdge(hx) + s * 0.05); ctx.lineTo(hx + s * 0.05, topEdge(hx) - s * 0.4); ctx.stroke();
-  }
-
-  // --- yeux (sphère brillante) ---
-  const blinking = f.blink > 0;
-  const drawEye = (ex, ey, r) => {
-    const eg = ctx.createRadialGradient(ex - r * 0.3, ey - r * 0.3, r * 0.1, ex, ey, r);
-    eg.addColorStop(0, "#fff"); eg.addColorStop(1, "#cfd8e0");
-    ctx.fillStyle = eg; ctx.beginPath(); ctx.arc(ex, ey, r, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = cLine; ctx.lineWidth = r * 0.12; ctx.stroke();
-    if (blinking) { ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = r * 0.3; ctx.beginPath(); ctx.moveTo(ex - r, ey); ctx.lineTo(ex + r, ey); ctx.stroke(); }
-    else {
-      ctx.fillStyle = "#0a0a14"; ctx.beginPath(); ctx.arc(ex + r * 0.15, ey, r * 0.5, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ex + r * 0.32, ey - r * 0.32, r * 0.2, 0, Math.PI * 2); ctx.fill();
+    for (const side of [1, -1]) {
+      const p = fin(finGeo(S * 0.7, S * 0.5));
+      p.rotation.x = Math.PI / 2; p.position.set(side * dx * 0.5, -dy * 0.85, -dz * 0.1 - i * dz * 0.3); p.scale.x = side; group.add(p);
     }
+  }
+
+  // museau
+  if (g.snout === "beak") {
+    const bk = fin(new THREE.ConeGeometry(S * 0.32, S * 0.7, 8), hornMat); bk.rotation.x = Math.PI / 2; bk.position.set(0, -dy * 0.1, dz * 1.05); group.add(bk);
+  } else if (g.snout === "whiskers") {
+    for (const side of [1, -1]) {
+      const wk = fin(new THREE.CylinderGeometry(S * 0.03, S * 0.03, S * 1.1, 5), hornMat);
+      wk.position.set(side * dx * 0.4, -dy * 0.3, dz * 0.9); wk.rotation.set(0.5, 0, side * 0.5); group.add(wk);
+    }
+  }
+
+  // cornes
+  for (let i = 0; i < g.horns; i++) {
+    const z = dz * (0.4 - i * 0.25), yTop = dy * Math.sqrt(Math.max(0, 1 - (z / dz) ** 2));
+    const hn = fin(new THREE.ConeGeometry(S * 0.13, S * 0.7, 6), hornMat);
+    hn.position.set(0, yTop * 0.95, z); hn.rotation.x = -0.4; group.add(hn);
+  }
+
+  // yeux
+  const er = S * g.eyeR;
+  const mkEye = (x, y, z) => {
+    const e = new THREE.Group();
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(er, 14, 14), whiteMat); e.add(ball);
+    const pup = new THREE.Mesh(new THREE.SphereGeometry(er * 0.5, 10, 10), darkMat); pup.position.set(0, 0, er * 0.7); e.add(pup);
+    e.position.set(x, y, z); group.add(e); return e;
   };
-  const er = (f.baby ? 1.25 : 1) * g.eyeR * s; // bébés gros yeux
-  if (g.eyes === 2) {
-    ctx.strokeStyle = cMid; ctx.lineWidth = s * 0.09; ctx.lineCap = "round";
-    for (const dx of [-0.1, 0.22]) {
-      const sx = L * (0.4 + dx);
-      ctx.beginPath(); ctx.moveTo(sx, topEdge(sx) + s * 0.05); ctx.lineTo(sx, topEdge(sx) - s * 0.4); ctx.stroke();
-      drawEye(sx, topEdge(sx) - s * 0.45, er * 0.8);
+  if (g.eyes === 2) { // sur tiges
+    for (const side of [1, -1]) {
+      const sx = side * dx * 0.45;
+      const stalk = fin(new THREE.CylinderGeometry(er * 0.3, er * 0.3, dy * 0.9, 6), bodyMat);
+      stalk.position.set(sx, dy * 0.9, dz * 0.3); group.add(stalk);
+      mkEye(sx, dy * 1.35, dz * 0.3);
     }
   } else {
-    drawEye(L * 0.55, -top * 0.28, er);
+    for (const side of [1, -1]) mkEye(side * dx * 0.7, dy * 0.32, dz * 0.55);
   }
 
-  // --- sourire ---
-  ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = s * 0.05; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.arc(L * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3); ctx.stroke();
-
-  ctx.restore();
+  group.userData = { tailPivot, pecs };
+  return { group, mats, tailPivot, pecs, dz };
 }
 
-// ===== physique : nage / attrapé / lancé + âge =====
-function step(f, t, dt) {
-  f.grow += (1 - f.grow) * (f.baby ? 0.005 : 0.06); // les bébés grandissent
-  f.blink = f.blink > 0 ? f.blink - 1 : (Math.random() < 0.004 ? 8 : 0);
-  f.mateCd -= dt;
-  f.age += dt;
-  const left = f.life - f.age;
-  f.alpha = left < 5000 ? clamp(left / 5000, 0, 1) : 1; // vieux → s'estompe et part
-  const old = left < 5000;
-  const sEff = f.size * f.grow;
-  const m = sEff * 1.2;
+// ===================== créatures : naissance / physique / vie =====================
+const creatures = [];
+const hearts = [];
 
-  if (f.mode === "held") { f.angle = Math.atan2(f.vy, f.vx) || f.angle; return; }
+function spawnAt(pos, opts = {}) {
+  const g = opts.genome || randomGenome();
+  const px = opts.size ?? rnd(26, 52);
+  const S = px * 0.05;                       // taille monde
+  const baby = !!opts.baby;
+  const built = buildCreature(g, S);
+  built.group.position.copy(pos);
+  built.group.scale.setScalar(baby ? 0.14 : 0.2);
+  scene.add(built.group);
+  creatures.push({
+    ...built, g, S, baby,
+    grow: baby ? 0.14 : 0.2,
+    vel: new THREE.Vector3(rnd(-4, 4), rnd(-4, 4), rnd(-2, 2)),
+    wander: new THREE.Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).normalize(),
+    nextTurn: 0, speed: rnd(7, 13) + (baby ? 4 : 0),
+    mode: "swim", age: 0, life: rnd(48, 95), mateCd: baby ? 11 : 3.5,
+    phase: rnd(0, 10), wig: rnd(0.9, 1.6), alpha: 1,
+  });
+  if (creatures.length > MAX) { const old = creatures.shift(); scene.remove(old.group); }
+}
 
-  if (f.mode === "thrown") {
-    f.x += f.vx; f.y += f.vy; f.vx *= 0.97; f.vy *= 0.97;
-    if (f.x < m && f.vx < 0) { f.x = m; f.vx *= -0.6; }
-    if (f.x > cv.width - m && f.vx > 0) { f.x = cv.width - m; f.vx *= -0.6; }
-    if (f.y < m && f.vy < 0) { f.y = m; f.vy *= -0.6; }
-    if (f.y > cv.height - m && f.vy > 0) { f.y = cv.height - m; f.vy *= -0.6; }
-    if (Math.hypot(f.vx, f.vy) > 0.5) f.angle = Math.atan2(f.vy, f.vx);
-    if (Math.hypot(f.vx, f.vy) < f.speed) { f.mode = "swim"; f.heading = f.angle; }
-    return;
+const tmp = new THREE.Vector3();
+function stepCreature(c, t, dt) {
+  c.grow += (1 - c.grow) * (c.baby ? 0.4 : 2.5) * dt;
+  c.group.scale.setScalar(clamp(c.grow, 0.05, 1));
+  c.age += dt; c.mateCd -= dt;
+  const left = c.life - c.age;
+  c.alpha = left < 5 ? clamp(left / 5, 0, 1) : 1;
+  if (c.alpha < 1) for (const m of c.mats) { m.transparent = true; m.opacity = c.alpha; }
+  const old = left < 5;
+
+  // ondulation queue + battement nageoires
+  c.tailPivot.rotation.y = Math.sin(t * 7 + c.phase) * 0.5 * c.wig;
+  for (const p of c.pecs) p.m.rotation.z = p.base + Math.sin(t * 6 + c.phase) * 0.4 * p.side;
+
+  const pos = c.group.position;
+  const b = bounds;
+  if (c.mode === "held") return;
+
+  if (c.mode === "thrown") {
+    pos.addScaledVector(c.vel, dt);
+    c.vel.multiplyScalar(Math.pow(0.12, dt)); // traînée
+  } else { // nage
+    if (t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.6, 0.6)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
+    tmp.copy(c.wander).multiplyScalar(c.speed * (old ? 1.7 : 1));
+    c.vel.lerp(tmp, clamp(dt * 1.5, 0, 1));
+    pos.addScaledVector(c.vel, dt);
   }
 
-  // nage : errance + lissage de vélocité
-  if (t > f.nextTurn) { f.turn = rnd(-0.5, 0.5); f.nextTurn = t + rnd(400, 1400); }
-  f.heading += f.turn * 0.01;
-  const spd = f.speed * (old ? 1.6 : 1); // les vieux accélèrent pour s'en aller
-  const dx = Math.cos(f.heading) * spd, dy = Math.sin(f.heading) * spd;
-  f.vx += (dx - f.vx) * 0.04; f.vy += (dy - f.vy) * 0.04;
-  f.x += f.vx; f.y += f.vy;
-  if (f.x < m) { f.x = m; f.heading = Math.PI - f.heading; }
-  if (f.x > cv.width - m) { f.x = cv.width - m; f.heading = Math.PI - f.heading; }
-  if (f.y < m) { f.y = m; f.heading = -f.heading; }
-  if (f.y > cv.height - m) { f.y = cv.height - m; f.heading = -f.heading; }
-  f.angle = Math.atan2(f.vy, f.vx);
+  // rebonds sur les parois du volume
+  for (const ax of ["x", "y", "z"]) {
+    const lim = b[ax];
+    if (pos[ax] > lim) { pos[ax] = lim; if (c.vel[ax] > 0) c.vel[ax] *= -0.7; c.wander[ax] *= -1; }
+    if (pos[ax] < -lim) { pos[ax] = -lim; if (c.vel[ax] < 0) c.vel[ax] *= -0.7; c.wander[ax] *= -1; }
+  }
+
+  if (c.vel.lengthSq() > 0.5) { tmp.copy(pos).add(c.vel); c.group.lookAt(tmp); }
+  if (c.mode === "thrown" && c.vel.length() < c.speed * 0.5) c.mode = "swim";
 }
 
-// ===== reproduction : deux adultes qui se rencontrent font un bébé =====
-function fertile(f) {
-  return f.g && f.mode === "swim" && f.grow > 0.96 && f.mateCd <= 0 && f.age < f.life - 8000;
-}
+// reproduction : deux adultes proches → bébé croisé
+function fertile(c) { return c.mode === "swim" && c.grow > 0.96 && c.mateCd <= 0 && c.age < c.life - 8; }
 function breeding() {
-  if (fish.length >= MAX) return;
-  for (let i = 0; i < fish.length; i++) {
-    const a = fish[i]; if (!fertile(a)) continue;
-    for (let j = i + 1; j < fish.length; j++) {
-      const b = fish[j]; if (!fertile(b)) continue;
-      const reach = (a.size * a.grow + b.size * b.grow) * 0.85;
-      if (Math.hypot(a.x - b.x, a.y - b.y) > reach) continue;
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-      spawn(mx, my, { genome: crossover(a.g, b.g), size: clamp((a.size + b.size) / 2 * rnd(0.85, 1.05), 18, 56), baby: true });
-      a.mateCd = b.mateCd = 13000;
-      hearts.push({ x: mx, y: my - 20, age: 0 });
-      return; // un seul couple par frame
+  if (creatures.length >= MAX) return;
+  for (let i = 0; i < creatures.length; i++) {
+    const a = creatures[i]; if (!fertile(a)) continue;
+    for (let j = i + 1; j < creatures.length; j++) {
+      const b = creatures[j]; if (!fertile(b)) continue;
+      const reach = (a.S * a.dz + b.S * b.dz) * 0.6 + 4;
+      if (a.group.position.distanceTo(b.group.position) > reach) continue;
+      const mid = a.group.position.clone().lerp(b.group.position, 0.5);
+      spawnAt(mid, { genome: crossover(a.g, b.g), size: clamp((a.S + b.S) / 2 / 0.05 * rnd(0.85, 1.05), 18, 56), baby: true });
+      a.mateCd = b.mateCd = 13;
+      hearts.push({ pos: mid.clone(), age: 0 });
+      return;
     }
   }
 }
 
-// ===== feedback détection visages =====
+// ===================== HUD 2D : visages + œufs + cœurs =====================
 let faces = [];
-function drawFaces(t) {
-  for (let i = 0; i < faces.length; i++) {
-    const fc = faces[i], H = fc.hue;
-    ctx.save();
-    ctx.strokeStyle = `hsl(${H} 85% 60% / ${fc.open ? 0.85 : 0.4})`;
-    ctx.lineWidth = fc.open ? 3 : 2; ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16); else ctx.rect(fc.x, fc.y, fc.w, fc.h);
-    ctx.stroke();
-    ctx.fillStyle = `hsl(${H} 85% 65%)`;
-    ctx.font = "13px sans-serif"; ctx.fillText("Humain " + fc.num, fc.x + 6, fc.y - 6);
+function drawHUD(t, dt) {
+  hctx.clearRect(0, 0, hud.width, hud.height);
+  for (const fc of faces) {
+    const H = fc.hue;
+    hctx.strokeStyle = `hsl(${H} 85% 60% / ${fc.open ? 0.85 : 0.4})`;
+    hctx.lineWidth = fc.open ? 3 : 2; hctx.beginPath();
+    if (hctx.roundRect) hctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16); else hctx.rect(fc.x, fc.y, fc.w, fc.h);
+    hctx.stroke();
+    hctx.fillStyle = `hsl(${H} 85% 65%)`; hctx.font = "13px sans-serif";
+    hctx.fillText("Humain " + fc.num, fc.x + 6, fc.y - 6);
     if (fc.egg) {
-      const r = fc.egg.r * (1 + Math.sin(t * 0.012) * 0.06);
-      ctx.fillStyle = `hsl(${H} 85% 70% / .28)`; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = `hsl(${H} 90% 65%)`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
+      const r = fc.egg.r * (1 + Math.sin(t * 12) * 0.06);
+      hctx.fillStyle = `hsl(${H} 85% 70% / .28)`; hctx.beginPath(); hctx.arc(fc.egg.x, fc.egg.y, r, 0, 7); hctx.fill();
+      hctx.strokeStyle = `hsl(${H} 90% 65%)`; hctx.lineWidth = 2; hctx.beginPath(); hctx.arc(fc.egg.x, fc.egg.y, r, 0, 7); hctx.stroke();
     }
-    ctx.restore();
   }
-}
-function drawHearts(dt) {
   for (let i = hearts.length - 1; i >= 0; i--) {
-    const h = hearts[i]; h.age += dt; h.y -= dt * 0.03;
-    if (h.age > 1500) { hearts.splice(i, 1); continue; }
-    ctx.save(); ctx.globalAlpha = 1 - h.age / 1500;
-    ctx.font = "24px sans-serif"; ctx.fillText("💞", h.x - 12, h.y);
-    ctx.restore();
+    const h = hearts[i]; h.age += dt; h.pos.y += dt * 3;
+    if (h.age > 1.6) { hearts.splice(i, 1); continue; }
+    const [sx, sy] = toScreen(h.pos);
+    hctx.globalAlpha = 1 - h.age / 1.6; hctx.font = "28px sans-serif"; hctx.fillText("💞", sx - 14, sy); hctx.globalAlpha = 1;
   }
 }
 
-let prevT = 0;
-function loop(t) {
-  const dt = prevT ? Math.min(64, t - prevT) : 16; prevT = t;
-  ctx.clearRect(0, 0, cv.width, cv.height);
-  drawFaces(t);
-  for (let i = fish.length - 1; i >= 0; i--) {
-    const f = fish[i];
-    step(f, t, dt); drawFish(f, t);
-    if (f.age > f.life) fish.splice(i, 1); // mort de vieillesse
+// ===================== boucle =====================
+const clock = new THREE.Clock();
+function animate() {
+  const dt = Math.min(0.05, clock.getDelta()), t = clock.getElapsedTime();
+  for (let i = creatures.length - 1; i >= 0; i--) {
+    const c = creatures[i]; stepCreature(c, t, dt);
+    if (c.age > c.life) { scene.remove(c.group); creatures.splice(i, 1); }
   }
   breeding();
-  drawHearts(dt);
-  requestAnimationFrame(loop);
+  drawHUD(t, dt);
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
 }
-requestAnimationFrame(loop);
+animate();
 
-// ===== attraper / déplacer / lancer =====
-let grabbed = null;
-cv.addEventListener("pointerdown", e => {
-  let best = null, bd = 1e9;
-  for (const f of fish) {
-    const d = Math.hypot(f.x - e.clientX, f.y - e.clientY);
-    if (d < f.size * f.grow * 1.5 && d < bd) { bd = d; best = f; }
-  }
-  if (best) { grabbed = best; best.mode = "held"; best.vx = best.vy = 0; cv.classList.add("grabbing"); }
+// ===================== attraper / déplacer / lancer (3D) =====================
+const raycaster = new THREE.Raycaster();
+const dragPlane = new THREE.Plane();
+const three = renderer.domElement;
+let grabbed = null, lastDrag = new THREE.Vector3(), lastT = 0;
+function ndc(e) { return new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1); }
+function creatureOf(obj) { while (obj) { const c = creatures.find(c => c.group === obj); if (c) return c; obj = obj.parent; } return null; }
+
+three.addEventListener("pointerdown", e => {
+  raycaster.setFromCamera(ndc(e), camera);
+  const hit = raycaster.intersectObjects(creatures.map(c => c.group), true)[0];
+  if (!hit) return;
+  const c = creatureOf(hit.object); if (!c) return;
+  grabbed = c; c.mode = "held"; c.vel.set(0, 0, 0); three.classList.add("grabbing");
+  camera.getWorldDirection(dragPlane.normal); dragPlane.setFromNormalAndCoplanarPoint(dragPlane.normal, c.group.position);
+  lastDrag.copy(c.group.position); lastT = clock.getElapsedTime();
 });
-cv.addEventListener("pointermove", e => {
+three.addEventListener("pointermove", e => {
   if (!grabbed) return;
-  grabbed.x = e.clientX; grabbed.y = e.clientY;
-  grabbed.vx = e.movementX; grabbed.vy = e.movementY;
+  raycaster.setFromCamera(ndc(e), camera);
+  const p = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(dragPlane, p)) return;
+  const now = clock.getElapsedTime(), d = Math.max(0.001, now - lastT);
+  grabbed.vel.copy(p).sub(lastDrag).divideScalar(d).clampLength(0, 60);
+  grabbed.group.position.copy(p); lastDrag.copy(p); lastT = now;
 });
-function drop() {
-  if (!grabbed) return;
-  const cap = 55;
-  grabbed.vx = clamp(grabbed.vx, -cap, cap); grabbed.vy = clamp(grabbed.vy, -cap, cap);
-  grabbed.mode = "thrown"; grabbed = null; cv.classList.remove("grabbing");
-}
-cv.addEventListener("pointerup", drop);
-cv.addEventListener("pointercancel", drop);
+function drop() { if (grabbed) { grabbed.mode = "thrown"; grabbed = null; three.classList.remove("grabbing"); } }
+three.addEventListener("pointerup", drop);
+three.addEventListener("pointercancel", drop);
 
-// ===== modal : dessine ton poisson =====
-const modal = document.getElementById("modal");
-const pad = document.getElementById("pad");
-const pctx = pad.getContext("2d");
-let penColor = "#ff5d73", erasing = false, painting = false;
-const COLORS = ["#ff5d73", "#ffd23f", "#3fd07a", "#3fb6ff", "#b15dff", "#ff8f3f", "#222"];
-const sw = document.getElementById("swatches");
-COLORS.forEach((c, i) => {
-  const d = document.createElement("div");
-  d.className = "sw" + (i === 0 ? " sel" : ""); d.style.background = c;
-  d.onclick = () => { penColor = c; erasing = false; [...sw.children].forEach(x => x.classList.remove("sel")); d.classList.add("sel"); };
-  sw.appendChild(d);
-});
-function padPos(e) { const r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
-pad.addEventListener("pointerdown", e => { painting = true; pctx.beginPath(); pctx.moveTo(...padPos(e)); });
-pad.addEventListener("pointermove", e => {
-  if (!painting) return;
-  pctx.lineCap = pctx.lineJoin = "round";
-  pctx.lineWidth = erasing ? 22 : 7;
-  pctx.globalCompositeOperation = erasing ? "destination-out" : "source-over";
-  pctx.strokeStyle = penColor;
-  pctx.lineTo(...padPos(e)); pctx.stroke();
-});
-addEventListener("pointerup", () => painting = false);
-document.getElementById("erase").onclick = () => erasing = true;
-document.getElementById("clear").onclick = () => pctx.clearRect(0, 0, pad.width, pad.height);
-document.getElementById("draw-btn").onclick = () => modal.classList.add("on");
-document.getElementById("cancel").onclick = () => modal.classList.remove("on");
-document.getElementById("release").onclick = () => {
-  const img = new Image();
-  img.onload = () => spawn(rnd(cv.width * .3, cv.width * .7), rnd(cv.height * .3, cv.height * .7), { img });
-  img.src = pad.toDataURL();
-  pctx.clearRect(0, 0, pad.width, pad.height);
-  modal.classList.remove("on");
-};
-
-// ===== détection bouche (≤4 visages) avec identité + couleur persistantes =====
-// FaceMesh ne donne pas d'ID stable : on suit chaque humain par proximité du centroïde.
-const humans = [];           // {id, hue, cx, cy, wasOpen, egg, miss}
-let nextId = 0;
-const PALETTE = [8, 45, 130, 200, 280, 330, 95, 250]; // teintes bien distinctes
+// ===================== détection bouche (≤4 visages, identité + couleur) =====================
+const humans = []; let nextId = 0;
+const PALETTE = [8, 45, 130, 200, 280, 330, 95, 250];
 const GROW = 6, MAXR = 78, MATCH = 0.22, FORGET = 30;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
 mesh.setOptions({ maxNumFaces: 4, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
@@ -464,66 +384,40 @@ mesh.onResults(r => {
  try {
   const list = r.multiFaceLandmarks || [];
   msg.style.display = list.length ? "none" : "block";
-
-  // 1) détections brutes (coords miroir comme la vidéo)
   const dets = list.map(lm => {
     let minX = 1, maxX = 0, minY = 1, maxY = 0;
-    for (const p of lm) {
-      const sx = 1 - p.x;
-      if (sx < minX) minX = sx; if (sx > maxX) maxX = sx;
-      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
-    }
+    for (const p of lm) { const sx = 1 - p.x; if (sx < minX) minX = sx; if (sx > maxX) maxX = sx; if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y; }
     const a = lm[13], b = lm[14], top = lm[10], bot = lm[152], valid = a && b && top && bot;
     const ratio = valid ? Math.abs(a.y - b.y) / Math.abs(top.y - bot.y) : 0;
-    return {
-      minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
-      ratio, isOpen: valid && ratio > 0.12,
-      mx: valid ? (1 - (a.x + b.x) / 2) * cv.width : 0, my: valid ? (a.y + b.y) / 2 * cv.height : 0,
-    };
+    return { minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, ratio, isOpen: valid && ratio > 0.12,
+      mx: valid ? (1 - (a.x + b.x) / 2) * innerWidth : 0, my: valid ? (a.y + b.y) / 2 * innerHeight : 0 };
   });
-
-  // 2) appariement aux humains mémorisés (plus proche centroïde)
   for (const h of humans) h.seen = false;
   for (const d of dets) {
     let best = null, bd = MATCH;
     for (const h of humans) { if (h.seen) continue; const dist = Math.hypot(h.cx - d.cx, h.cy - d.cy); if (dist < bd) { bd = dist; best = h; } }
     if (!best) { const id = nextId++; best = { id, hue: PALETTE[id % PALETTE.length], wasOpen: false, egg: null }; humans.push(best); }
     best.seen = true; best.miss = 0; best.cx = d.cx; best.cy = d.cy; d.h = best;
-
-    // 3) couvaison portée par l'humain → le poisson hérite de sa couleur
-    if (d.isOpen) {
-      if (!best.egg) best.egg = { x: d.mx, y: d.my, growth: 0 };
-      best.egg.growth += d.ratio; best.egg.x = d.mx; best.egg.y = d.my;
-    } else if (best.wasOpen && best.egg) {
+    if (d.isOpen) { if (!best.egg) best.egg = { x: d.mx, y: d.my, growth: 0 }; best.egg.growth += d.ratio; best.egg.x = d.mx; best.egg.y = d.my; }
+    else if (best.wasOpen && best.egg) {
       const size = clamp(16 + best.egg.growth * GROW, 16, MAXR);
-      spawn(best.egg.x, best.egg.y, { size, genome: randomGenome(best.hue) });
+      spawnAt(screenToWorld(best.egg.x, best.egg.y), { size, genome: randomGenome(best.hue) });
       best.egg = null;
     }
     best.wasOpen = d.isOpen;
   }
-
-  // 4) oublie les humains absents trop longtemps (garde l'identité sur une brève perte)
-  for (let i = humans.length - 1; i >= 0; i--) {
-    if (humans[i].seen) continue;
-    if ((humans[i].miss = (humans[i].miss || 0) + 1) > FORGET) humans.splice(i, 1);
-  }
-
-  // 5) ce que la boucle de rendu affiche
+  for (let i = humans.length - 1; i >= 0; i--) { if (humans[i].seen) continue; if ((humans[i].miss = (humans[i].miss || 0) + 1) > FORGET) humans.splice(i, 1); }
   faces = dets.map(d => {
     const er = d.h.egg ? Math.min(MAXR, 16 + d.h.egg.growth * GROW) : 0;
-    return {
-      x: d.minX * cv.width, y: d.minY * cv.height, w: (d.maxX - d.minX) * cv.width, h: (d.maxY - d.minY) * cv.height,
-      open: d.isOpen, hue: d.h.hue, num: humans.indexOf(d.h) + 1,
-      egg: d.h.egg ? { x: d.h.egg.x, y: d.h.egg.y, r: er } : null,
-    };
+    return { x: d.minX * innerWidth, y: d.minY * innerHeight, w: (d.maxX - d.minX) * innerWidth, h: (d.maxY - d.minY) * innerHeight,
+      open: d.isOpen, hue: d.h.hue, num: humans.indexOf(d.h) + 1, egg: d.h.egg ? { x: d.h.egg.x, y: d.h.egg.y, r: er } : null };
   });
  } catch (e) { console.warn("onResults", e); }
 });
 
 (async () => {
   const cam = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
-  vid.srcObject = cam;
-  await vid.play();
+  vid.srcObject = cam; await vid.play();
   (function pump() { mesh.send({ image: vid }).catch(() => {}).then(() => requestAnimationFrame(pump)); })();
 })();
 </script>
