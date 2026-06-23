@@ -1,18 +1,55 @@
 <!doctype html>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Aquarium de la bouche</title>
 <style>
-  body { margin: 0; background: #02141f; overflow: hidden; font-family: sans-serif; }
+  body { margin: 0; background: #02141f; overflow: hidden; font-family: sans-serif; touch-action: none; }
   #wrap { position: fixed; inset: 0; }
-  video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  video { transform: scaleX(-1); opacity: .3; }
-  #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; }
+  video, #cv { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  video { transform: scaleX(-1); opacity: .28; }
+  #cv { cursor: grab; }
+  #cv.grabbing { cursor: grabbing; }
+  #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; pointer-events: none; }
+  #draw-btn { position: fixed; top: 12px; right: 12px; z-index: 5; border: 0; border-radius: 999px;
+    padding: 10px 16px; font-size: 15px; font-weight: 600; cursor: pointer; color: #02141f;
+    background: linear-gradient(135deg, #ffe16b, #ff8fb1); box-shadow: 0 4px 14px #0006; }
+
+  #modal { position: fixed; inset: 0; z-index: 10; display: none; align-items: center; justify-content: center;
+    background: #02141fcc; backdrop-filter: blur(3px); }
+  #modal.on { display: flex; }
+  #panel { background: #0c2433; padding: 18px; border-radius: 16px; box-shadow: 0 10px 40px #000a; }
+  #panel h2 { margin: 0 0 4px; color: #fff; font-size: 17px; }
+  #panel p { margin: 0 0 10px; color: #8fb6c9; font-size: 13px; }
+  #pad { background: #fff; border-radius: 10px; touch-action: none; display: block; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+  .sw { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #fff3; cursor: pointer; }
+  .sw.sel { border-color: #fff; transform: scale(1.15); }
+  .btn { border: 0; border-radius: 8px; padding: 9px 14px; font-weight: 600; cursor: pointer; }
+  .btn.ghost { background: #1d3d4f; color: #cfe6f0; }
+  .btn.go { background: linear-gradient(135deg, #6bffa1, #6bd0ff); color: #02141f; margin-left: auto; }
 </style>
+
 <div id="wrap">
   <video id="vid" autoplay playsinline muted></video>
   <canvas id="cv"></canvas>
 </div>
-<div id="msg">Ouvre la bouche pour libérer un poisson…</div>
+<div id="msg">Ouvre la bouche pour libérer une créature… (attrape-les à la souris !)</div>
+<button id="draw-btn">🎨 Dessine ton poisson</button>
+
+<div id="modal">
+  <div id="panel">
+    <h2>Dessine ton poisson</h2>
+    <p>Dessine-le tourné vers la droite ➜, puis lâche-le dans l'aquarium.</p>
+    <canvas id="pad" width="360" height="240"></canvas>
+    <div class="row" id="swatches"></div>
+    <div class="row">
+      <button class="btn ghost" id="erase">Gomme</button>
+      <button class="btn ghost" id="clear">Effacer</button>
+      <button class="btn ghost" id="cancel">Annuler</button>
+      <button class="btn go" id="release">Lâcher dans l'aquarium 🐟</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 <script>
@@ -21,44 +58,47 @@ const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 const msg = document.getElementById("msg");
 const fish = [];
-const MAX = 20; // ponytail: plafond simple, retire le plus vieux au-delà
+const MAX = 24; // ponytail: plafond simple, retire le plus vieux au-delà
 
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener("resize", resize); resize();
 
 const rnd = (a, b) => a + Math.random() * (b - a);
+const ri = (a, b) => Math.floor(rnd(a, b + 1));
 const pick = a => a[Math.floor(Math.random() * a.length)];
 
-function spawn(x, y) {
+// ===== création d'une créature (génome façon Spore quand auto) =====
+function spawn(x, y, img) {
   const hue = rnd(0, 360);
   fish.push({
-    x, y,
-    angle: rnd(0, Math.PI * 2),
+    x, y, vx: rnd(-1, 1), vy: rnd(-1, 1),
+    heading: rnd(0, Math.PI * 2),
     speed: rnd(1.1, 2.6),
-    size: rnd(26, 54),
+    size: img ? rnd(34, 46) : rnd(26, 52),
+    angle: 0, mode: "swim",
+    img: img || null,
     body: `hsl(${hue} 80% 58%)`,
-    belly: `hsl(${hue} 70% 80%)`,
-    fin: `hsl(${(hue + 35) % 360} 85% 50%)`,
+    belly: `hsl(${hue} 70% 82%)`,
+    fin: `hsl(${(hue + 35) % 360} 85% 52%)`,
+    mark: `hsl(${(hue + 170) % 360} 75% 65%)`,
     pattern: pick(["stripes", "spots", "plain", "plain"]),
-    mark: `hsl(${(hue + 180) % 360} 75% 65%)`,
     spots: Array.from({ length: 7 }, () => [rnd(-0.6, 0.7), rnd(-0.5, 0.5)]),
-    phase: rnd(0, 10),
-    wiggle: rnd(0.9, 1.6),
-    turn: 0,
-    nextTurn: 0,
-    scale: 0.1,
-    blink: 0,
+    // pièces procédurales :
+    eyes: ri(1, 2), spikes: ri(0, 5), horns: ri(0, 2), bellyFins: ri(0, 2),
+    finStyle: pick(["forked", "fan"]),
+    bodyH: rnd(0.66, 1),
+    phase: rnd(0, 10), wiggle: rnd(0.9, 1.6),
+    turn: 0, nextTurn: 0, scale: 0.1, blink: 0,
   });
   if (fish.length > MAX) fish.shift();
 }
 
-// trace le contour du corps (museau vers +x) — réutilisé pour remplir ET découper
-function bodyPath(s) {
+function bodyPath(s, h) {
   ctx.beginPath();
   ctx.moveTo(s, 0);
-  ctx.quadraticCurveTo(s * 0.3, -s * 0.78, -s * 0.78, -s * 0.18);
+  ctx.quadraticCurveTo(s * 0.3, -s * 0.78 * h, -s * 0.78, -s * 0.18 - s * 0.0);
   ctx.quadraticCurveTo(-s * 1.02, 0, -s * 0.78, s * 0.18);
-  ctx.quadraticCurveTo(s * 0.3, s * 0.78, s, 0);
+  ctx.quadraticCurveTo(s * 0.3, s * 0.78 * h, s, 0);
   ctx.closePath();
 }
 
@@ -66,139 +106,291 @@ function drawFish(f, t) {
   const s = f.size;
   const facingLeft = Math.cos(f.angle) < 0;
   const wig = Math.sin(t * 0.006 * f.speed + f.phase) * f.wiggle;
-
   ctx.save();
   ctx.translate(f.x, f.y);
   ctx.rotate(f.angle);
-  if (facingLeft) ctx.scale(1, -1); // garde le poisson à l'endroit
-  ctx.scale(f.scale, f.scale);      // petite anim d'apparition
+  if (facingLeft) ctx.scale(1, -1);
+  ctx.scale(f.scale, f.scale);
 
-  // queue ondulante
+  if (f.img) {                       // poisson dessiné par l'utilisateur
+    const iw = f.img.width, ih = f.img.height;
+    const k = (s * 2.6) / Math.max(iw, ih);
+    ctx.rotate(wig * 0.05);
+    ctx.drawImage(f.img, -iw * k / 2, -ih * k / 2, iw * k, ih * k);
+    ctx.restore();
+    return;
+  }
+
+  const h = f.bodyH;
   const ty = wig * s * 0.45;
+
+  // queue
   ctx.fillStyle = f.fin;
   ctx.beginPath();
   ctx.moveTo(-s * 0.75, 0);
-  ctx.quadraticCurveTo(-s * 1.5, ty - s * 0.7, -s * 1.75, ty - s * 0.55);
-  ctx.quadraticCurveTo(-s * 1.25, ty, -s * 1.75, ty + s * 0.55);
-  ctx.quadraticCurveTo(-s * 1.5, ty + s * 0.7, -s * 0.75, 0);
+  if (f.finStyle === "forked") {
+    ctx.quadraticCurveTo(-s * 1.5, ty - s * 0.7, -s * 1.75, ty - s * 0.55);
+    ctx.quadraticCurveTo(-s * 1.25, ty, -s * 1.75, ty + s * 0.55);
+    ctx.quadraticCurveTo(-s * 1.5, ty + s * 0.7, -s * 0.75, 0);
+  } else {
+    ctx.quadraticCurveTo(-s * 1.4, ty - s * 0.85, -s * 1.7, ty - s * 0.2);
+    ctx.quadraticCurveTo(-s * 1.85, ty, -s * 1.7, ty + s * 0.2);
+    ctx.quadraticCurveTo(-s * 1.4, ty + s * 0.85, -s * 0.75, 0);
+  }
   ctx.fill();
 
-  // nageoire dorsale
-  ctx.beginPath();
-  ctx.moveTo(-s * 0.25, -s * 0.5);
-  ctx.quadraticCurveTo(-s * 0.1, -s * 1.05, s * 0.45, -s * 0.42);
-  ctx.fill();
+  // épines dorsales (Spore)
+  ctx.fillStyle = f.fin;
+  for (let i = 0; i < f.spikes; i++) {
+    const px = -s * 0.4 + (i / Math.max(1, f.spikes - 1)) * s * 0.8;
+    const ph = s * (0.45 - Math.abs(px) / s * 0.25) * h;
+    const top = -Math.sqrt(Math.max(0, 1 - (px / s) ** 2)) * s * 0.72 * h;
+    ctx.beginPath();
+    ctx.moveTo(px - s * 0.08, top + s * 0.05);
+    ctx.lineTo(px, top - ph);
+    ctx.lineTo(px + s * 0.08, top + s * 0.05);
+    ctx.closePath(); ctx.fill();
+  }
+  // nageoire dorsale si pas d'épines
+  if (!f.spikes) {
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.25, -s * 0.5 * h);
+    ctx.quadraticCurveTo(-s * 0.1, -s * 1.05 * h, s * 0.45, -s * 0.42 * h);
+    ctx.fill();
+  }
 
-  // corps
-  ctx.fillStyle = f.body;
-  bodyPath(s);
-  ctx.fill();
-
-  // ventre clair
+  // corps + ventre
+  ctx.fillStyle = f.body; bodyPath(s, h); ctx.fill();
   ctx.fillStyle = f.belly;
   ctx.beginPath();
   ctx.moveTo(s * 0.85, s * 0.05);
-  ctx.quadraticCurveTo(s * 0.2, s * 0.7, -s * 0.7, s * 0.18);
+  ctx.quadraticCurveTo(s * 0.2, s * 0.72, -s * 0.7, s * 0.18);
   ctx.quadraticCurveTo(-s * 0.2, s * 0.3, s * 0.85, s * 0.05);
   ctx.fill();
 
-  // motifs (découpés dans le corps)
+  // motifs
   if (f.pattern !== "plain") {
-    ctx.save();
-    bodyPath(s); ctx.clip();
+    ctx.save(); bodyPath(s, h); ctx.clip();
     ctx.fillStyle = f.mark;
     if (f.pattern === "stripes") {
       for (let i = -1; i <= 2; i++) {
         ctx.beginPath();
-        ctx.ellipse(s * (0.1 - i * 0.4), 0, s * 0.12, s, 0, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.ellipse(s * (0.1 - i * 0.4), 0, s * 0.12, s, 0, 0, Math.PI * 2); ctx.fill();
       }
     } else {
       for (const [sx, sy] of f.spots) {
-        ctx.beginPath();
-        ctx.arc(s * sx, s * sy, s * 0.1, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.beginPath(); ctx.arc(s * sx, s * sy, s * 0.1, 0, Math.PI * 2); ctx.fill();
       }
     }
     ctx.restore();
   }
 
-  // nageoire pectorale
+  // nageoire pectorale + nageoires ventrales (Spore)
   ctx.fillStyle = f.fin;
   ctx.beginPath();
   ctx.moveTo(s * 0.15, s * 0.1);
   ctx.quadraticCurveTo(-s * 0.1, s * 0.6 + ty * 0.3, s * 0.45, s * 0.35);
   ctx.fill();
+  for (let i = 0; i < f.bellyFins; i++) {
+    const px = -s * 0.1 - i * s * 0.35;
+    ctx.beginPath();
+    ctx.moveTo(px, s * 0.2 * h);
+    ctx.quadraticCurveTo(px - s * 0.1, s * 0.65 * h + ty * 0.2, px + s * 0.2, s * 0.45 * h);
+    ctx.fill();
+  }
 
-  // œil cartoon
+  // cornes (Spore)
+  ctx.strokeStyle = f.fin; ctx.lineWidth = s * 0.08; ctx.lineCap = "round";
+  for (let i = 0; i < f.horns; i++) {
+    const hx = s * (0.45 - i * 0.22);
+    ctx.beginPath();
+    ctx.moveTo(hx, -s * 0.45 * h);
+    ctx.lineTo(hx + s * 0.05, -s * 0.8 * h);
+    ctx.stroke();
+  }
+
+  // yeux
   const blinking = f.blink > 0;
-  ctx.fillStyle = "#fff";
-  ctx.beginPath(); ctx.arc(s * 0.55, -s * 0.2, s * 0.18, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = "#0a0a14";
-  if (blinking) {
-    ctx.lineWidth = s * 0.05; ctx.strokeStyle = "#0a0a14";
-    ctx.beginPath(); ctx.moveTo(s * 0.42, -s * 0.2); ctx.lineTo(s * 0.68, -s * 0.2); ctx.stroke();
-  } else {
-    ctx.beginPath(); ctx.arc(s * 0.6, -s * 0.2, s * 0.09, 0, Math.PI * 2); ctx.fill();
+  const drawEye = (ex, ey, r) => {
     ctx.fillStyle = "#fff";
-    ctx.beginPath(); ctx.arc(s * 0.63, -s * 0.23, s * 0.03, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ex, ey, r, 0, Math.PI * 2); ctx.fill();
+    if (blinking) {
+      ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = r * 0.3;
+      ctx.beginPath(); ctx.moveTo(ex - r, ey); ctx.lineTo(ex + r, ey); ctx.stroke();
+    } else {
+      ctx.fillStyle = "#0a0a14";
+      ctx.beginPath(); ctx.arc(ex + r * 0.15, ey, r * 0.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#fff";
+      ctx.beginPath(); ctx.arc(ex + r * 0.3, ey - r * 0.3, r * 0.18, 0, Math.PI * 2); ctx.fill();
+    }
+  };
+  if (f.eyes === 2) {                 // yeux sur tiges
+    ctx.strokeStyle = f.body; ctx.lineWidth = s * 0.08;
+    for (const dx of [-0.1, 0.25]) {
+      ctx.beginPath();
+      ctx.moveTo(s * (0.3 + dx), -s * 0.35 * h);
+      ctx.lineTo(s * (0.32 + dx), -s * 0.78 * h);
+      ctx.stroke();
+      drawEye(s * (0.32 + dx), -s * 0.85 * h, s * 0.14);
+    }
+  } else {
+    drawEye(s * 0.55, -s * 0.2 * h, s * 0.18);
   }
 
   // sourire
-  ctx.strokeStyle = "#0a0a14";
-  ctx.lineWidth = s * 0.05;
-  ctx.beginPath();
-  ctx.arc(s * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3);
-  ctx.stroke();
+  ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = s * 0.05;
+  ctx.beginPath(); ctx.arc(s * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3); ctx.stroke();
 
   ctx.restore();
 }
 
+// ===== physique : nage / attrapé / lancé =====
 function step(f, t) {
-  // errance douce : change de cap de temps en temps
-  if (t > f.nextTurn) { f.turn = rnd(-0.5, 0.5); f.nextTurn = t + rnd(400, 1400); }
-  f.angle += f.turn * 0.01;
-
-  let vx = Math.cos(f.angle) * f.speed;
-  let vy = Math.sin(f.angle) * f.speed;
-  f.x += vx; f.y += vy;
-
-  // rebond sur les bords de l'aquarium
-  const m = f.size * 1.2;
-  if (f.x < m && vx < 0) f.angle = Math.PI - f.angle;
-  if (f.x > cv.width - m && vx > 0) f.angle = Math.PI - f.angle;
-  if (f.y < m && vy < 0) f.angle = -f.angle;
-  if (f.y > cv.height - m && vy > 0) f.angle = -f.angle;
-  f.x = Math.max(m, Math.min(cv.width - m, f.x));
-  f.y = Math.max(m, Math.min(cv.height - m, f.y));
-
   if (f.scale < 1) f.scale = Math.min(1, f.scale + 0.04);
   f.blink = f.blink > 0 ? f.blink - 1 : (Math.random() < 0.004 ? 8 : 0);
+  const m = f.size * 1.2;
+
+  if (f.mode === "held") { f.angle = Math.atan2(f.vy, f.vx) || f.angle; return; }
+
+  if (f.mode === "thrown") {
+    f.x += f.vx; f.y += f.vy;
+    f.vx *= 0.97; f.vy *= 0.97;                 // traînée
+    if (f.x < m && f.vx < 0) { f.x = m; f.vx *= -0.6; }
+    if (f.x > cv.width - m && f.vx > 0) { f.x = cv.width - m; f.vx *= -0.6; }
+    if (f.y < m && f.vy < 0) { f.y = m; f.vy *= -0.6; }
+    if (f.y > cv.height - m && f.vy > 0) { f.y = cv.height - m; f.vy *= -0.6; }
+    if (Math.hypot(f.vx, f.vy) > 0.5) f.angle = Math.atan2(f.vy, f.vx);
+    if (Math.hypot(f.vx, f.vy) < f.speed) { f.mode = "swim"; f.heading = f.angle; }
+    return;
+  }
+
+  // nage : errance + lissage de vélocité
+  if (t > f.nextTurn) { f.turn = rnd(-0.5, 0.5); f.nextTurn = t + rnd(400, 1400); }
+  f.heading += f.turn * 0.01;
+  const dx = Math.cos(f.heading) * f.speed, dy = Math.sin(f.heading) * f.speed;
+  f.vx += (dx - f.vx) * 0.04; f.vy += (dy - f.vy) * 0.04;
+  f.x += f.vx; f.y += f.vy;
+  if (f.x < m) { f.x = m; f.heading = Math.PI - f.heading; }
+  if (f.x > cv.width - m) { f.x = cv.width - m; f.heading = Math.PI - f.heading; }
+  if (f.y < m) { f.y = m; f.heading = -f.heading; }
+  if (f.y > cv.height - m) { f.y = cv.height - m; f.heading = -f.heading; }
+  f.angle = Math.atan2(f.vy, f.vx);
+}
+
+// ===== feedback détection visages =====
+let faces = [];
+function drawFaces() {
+  for (let i = 0; i < faces.length; i++) {
+    const fc = faces[i];
+    ctx.save();
+    ctx.strokeStyle = fc.open ? "rgba(120,255,170,.55)" : "rgba(120,200,255,.3)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16);
+    else ctx.rect(fc.x, fc.y, fc.w, fc.h);
+    ctx.stroke();
+    ctx.fillStyle = fc.open ? "rgba(120,255,170,.9)" : "rgba(120,200,255,.7)";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("Humain " + (i + 1), fc.x + 6, fc.y - 6);
+    ctx.restore();
+  }
 }
 
 function loop(t) {
   ctx.clearRect(0, 0, cv.width, cv.height);
+  drawFaces();
   for (const f of fish) { step(f, t); drawFish(f, t); }
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
 
-// --- détection bouche : un poisson par ouverture ---
-let mouthWasOpen = false;
-const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
-mesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
-mesh.onResults(r => {
-  if (!r.multiFaceLandmarks?.length) { mouthWasOpen = false; return; }
-  const lm = r.multiFaceLandmarks[0];
-  const open = Math.abs(lm[13].y - lm[14].y) / Math.abs(lm[10].y - lm[152].y);
-  msg.style.display = "none";
-  const isOpen = open > 0.12;
-  if (isOpen && !mouthWasOpen) {            // front montant = 1 seul poisson
-    const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
-    const my = (lm[13].y + lm[14].y) / 2 * cv.height;
-    spawn(mx, my);
+// ===== attraper / déplacer / lancer =====
+let grabbed = null;
+cv.addEventListener("pointerdown", e => {
+  let best = null, bd = 1e9;
+  for (const f of fish) {
+    const d = Math.hypot(f.x - e.clientX, f.y - e.clientY);
+    if (d < f.size * 1.5 && d < bd) { bd = d; best = f; }
   }
-  mouthWasOpen = isOpen;
+  if (best) { grabbed = best; best.mode = "held"; best.vx = best.vy = 0; cv.classList.add("grabbing"); }
+});
+cv.addEventListener("pointermove", e => {
+  if (!grabbed) return;
+  grabbed.x = e.clientX; grabbed.y = e.clientY;
+  grabbed.vx = e.movementX; grabbed.vy = e.movementY;   // vitesse réelle du pointeur
+});
+function drop() {
+  if (!grabbed) return;
+  const cap = 55;
+  grabbed.vx = Math.max(-cap, Math.min(cap, grabbed.vx));
+  grabbed.vy = Math.max(-cap, Math.min(cap, grabbed.vy));
+  grabbed.mode = "thrown";
+  grabbed = null; cv.classList.remove("grabbing");
+}
+cv.addEventListener("pointerup", drop);
+cv.addEventListener("pointercancel", drop);
+
+// ===== modal : dessine ton poisson =====
+const modal = document.getElementById("modal");
+const pad = document.getElementById("pad");
+const pctx = pad.getContext("2d");
+let penColor = "#ff5d73", erasing = false, painting = false;
+const COLORS = ["#ff5d73", "#ffd23f", "#3fd07a", "#3fb6ff", "#b15dff", "#ff8f3f", "#222"];
+const sw = document.getElementById("swatches");
+COLORS.forEach((c, i) => {
+  const d = document.createElement("div");
+  d.className = "sw" + (i === 0 ? " sel" : ""); d.style.background = c;
+  d.onclick = () => { penColor = c; erasing = false; [...sw.children].forEach(x => x.classList.remove("sel")); d.classList.add("sel"); };
+  sw.appendChild(d);
+});
+function padPos(e) { const r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+pad.addEventListener("pointerdown", e => { painting = true; pctx.beginPath(); pctx.moveTo(...padPos(e)); });
+pad.addEventListener("pointermove", e => {
+  if (!painting) return;
+  pctx.lineCap = pctx.lineJoin = "round";
+  pctx.lineWidth = erasing ? 22 : 7;
+  pctx.globalCompositeOperation = erasing ? "destination-out" : "source-over";
+  pctx.strokeStyle = penColor;
+  pctx.lineTo(...padPos(e)); pctx.stroke();
+});
+addEventListener("pointerup", () => painting = false);
+document.getElementById("erase").onclick = () => erasing = true;
+document.getElementById("clear").onclick = () => pctx.clearRect(0, 0, pad.width, pad.height);
+document.getElementById("draw-btn").onclick = () => { modal.classList.add("on"); };
+document.getElementById("cancel").onclick = () => modal.classList.remove("on");
+document.getElementById("release").onclick = () => {
+  const img = new Image();
+  img.onload = () => spawn(rnd(cv.width * .3, cv.width * .7), rnd(cv.height * .3, cv.height * .7), img);
+  img.src = pad.toDataURL();
+  pctx.clearRect(0, 0, pad.width, pad.height);
+  modal.classList.remove("on");
+};
+
+// ===== détection bouche (2 visages) =====
+const wasOpen = [];
+const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+mesh.setOptions({ maxNumFaces: 2, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+mesh.onResults(r => {
+  const list = r.multiFaceLandmarks || [];
+  msg.style.display = list.length ? "none" : "block";
+  faces = list.map((lm, i) => {
+    let minX = 1, maxX = 0, minY = 1, maxY = 0;
+    for (const p of lm) {
+      const sx = 1 - p.x;                       // miroir comme la vidéo
+      if (sx < minX) minX = sx; if (sx > maxX) maxX = sx;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+    const open = Math.abs(lm[13].y - lm[14].y) / Math.abs(lm[10].y - lm[152].y);
+    const isOpen = open > 0.12;
+    if (isOpen && !wasOpen[i]) {                // front montant = 1 créature
+      const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
+      const my = (lm[13].y + lm[14].y) / 2 * cv.height;
+      spawn(mx, my);
+    }
+    wasOpen[i] = isOpen;
+    return { x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height, open: isOpen };
+  });
+  wasOpen.length = list.length;
 });
 
 (async () => {
