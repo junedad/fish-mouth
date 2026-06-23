@@ -33,7 +33,7 @@
   <video id="vid" autoplay playsinline muted></video>
   <canvas id="cv"></canvas>
 </div>
-<div id="msg">Ouvre la bouche pour libérer une créature… (attrape-les à la souris !)</div>
+<div id="msg">Ouvre la bouche pour pondre une créature… attrape-les à la souris, et laisse-les se rencontrer 💞</div>
 <button id="draw-btn">🎨 Dessine ton poisson</button>
 
 <div id="modal">
@@ -58,7 +58,8 @@ const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d");
 const msg = document.getElementById("msg");
 const fish = [];
-const MAX = 24; // ponytail: plafond simple, retire le plus vieux au-delà
+const hearts = [];
+const MAX = 26; // ponytail: plafond simple, retire le plus vieux au-delà
 
 function resize() { cv.width = innerWidth; cv.height = innerHeight; }
 addEventListener("resize", resize); resize();
@@ -66,144 +67,190 @@ addEventListener("resize", resize); resize();
 const rnd = (a, b) => a + Math.random() * (b - a);
 const ri = (a, b) => Math.floor(rnd(a, b + 1));
 const pick = a => a[Math.floor(Math.random() * a.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+// mélange circulaire de teintes (chemin le plus court)
+const blendHue = (a, b) => { const d = ((b - a + 540) % 360) - 180; return (a + d * rnd(0.35, 0.65) + rnd(-12, 12) + 360) % 360; };
+const blend = (a, b, m) => a + (b - a) * rnd(0.35, 0.65) + rnd(-m, m);
 
-// ===== création d'une créature (génome façon Spore quand auto) =====
-// maturité 0 = bébé (petit, gros yeux, peu de pièces) → 1 = adulte (grand, complet)
-function spawn(x, y, opts = {}) {
+// ===== formes de corps (museau vers +x) =====
+const SHAPES = {
+  normal:   { lx: 1.00, hy: 1.00, back: 0.78 },
+  long:     { lx: 1.55, hy: 0.60, back: 0.92 }, // anguille
+  round:    { lx: 0.82, hy: 1.20, back: 1.02 }, // poisson-globe
+  flat:     { lx: 0.80, hy: 1.34, back: 0.96 }, // poisson-disque
+  teardrop: { lx: 1.12, hy: 0.94, back: 0.70 },
+};
+function geo(s, g) {
+  const P = SHAPES[g.bodyShape] || SHAPES.normal;
+  return { L: s * P.lx, top: s * 0.78 * g.bodyH * P.hy, rear: -s * P.lx * P.back };
+}
+function bodyPath(s, g) {
+  const { L, top, rear } = geo(s, g);
+  ctx.beginPath();
+  ctx.moveTo(L, 0);
+  ctx.quadraticCurveTo(L * 0.32, -top, rear, -top * 0.28);
+  ctx.quadraticCurveTo(rear - s * 0.18, 0, rear, top * 0.28);
+  ctx.quadraticCurveTo(L * 0.32, top, L, 0);
+  ctx.closePath();
+}
+
+// ===== génome (héritable) =====
+function randomGenome() {
   const hue = rnd(0, 360);
+  return {
+    hue, finHue: (hue + ri(20, 80)) % 360, markHue: (hue + ri(140, 200)) % 360,
+    bodyShape: pick(["normal", "long", "round", "flat", "teardrop"]),
+    bodyH: rnd(0.72, 1.06),
+    tail: pick(["forked", "fan", "round", "pointy"]),
+    dorsal: pick(["spikes", "spikes", "sail", "none"]),
+    spikes: ri(2, 6), sailH: rnd(0.8, 1.4),
+    horns: ri(0, 2), bellyFins: ri(0, 2),
+    eyes: Math.random() < 0.4 ? 2 : 1, eyeR: rnd(0.16, 0.30),
+    snout: pick(["none", "none", "beak", "whiskers"]),
+    pattern: pick(["stripes", "spots", "plain", "plain"]),
+    spotN: ri(4, 8),
+  };
+}
+// croisement papa × maman
+function crossover(A, B) {
+  const g = {};
+  for (const k of ["bodyShape", "tail", "dorsal", "snout", "pattern", "eyes"]) g[k] = Math.random() < 0.5 ? A[k] : B[k];
+  for (const k of ["spikes", "horns", "bellyFins", "spotN"]) g[k] = Math.max(0, (Math.random() < 0.5 ? A[k] : B[k]) + (Math.random() < 0.18 ? ri(-1, 1) : 0));
+  g.hue = blendHue(A.hue, B.hue);
+  g.finHue = (g.hue + ri(20, 80)) % 360;
+  g.markHue = (g.hue + ri(140, 200)) % 360;
+  g.bodyH = clamp(blend(A.bodyH, B.bodyH, 0.05), 0.6, 1.15);
+  g.eyeR = clamp(blend(A.eyeR, B.eyeR, 0.02), 0.15, 0.32);
+  g.sailH = blend(A.sailH, B.sailH, 0.1);
+  return g;
+}
+
+// ===== naissance =====
+function spawn(x, y, opts = {}) {
   const img = opts.img || null;
-  const size = opts.size ?? (img ? rnd(34, 46) : rnd(26, 52));
-  const mat = opts.maturity ?? rnd(0.3, 0.85);
+  const g = img ? null : (opts.genome || randomGenome());
+  const size = opts.size ?? (img ? rnd(36, 48) : rnd(26, 52));
+  const baby = !!opts.baby;
   fish.push({
     x, y, vx: rnd(-1, 1), vy: rnd(-1, 1),
-    heading: rnd(0, Math.PI * 2),
-    speed: rnd(1.1, 2.6) + (1 - mat) * 0.8,     // bébés plus frétillants
-    size, angle: 0, mode: "swim",
-    img, hue,
-    body: `hsl(${hue} 80% 58%)`,
-    belly: `hsl(${hue} 70% 82%)`,
-    fin: `hsl(${(hue + 35) % 360} 85% 52%)`,
-    mark: `hsl(${(hue + 170) % 360} 75% 65%)`,
-    pattern: pick(["stripes", "spots", "plain", "plain"]),
-    spots: Array.from({ length: 7 }, () => [rnd(-0.6, 0.7), rnd(-0.5, 0.5)]),
-    // pièces procédurales pilotées par la maturité :
-    eyes: mat > 0.62 ? 2 : 1,
-    spikes: Math.round(mat * 5),
-    horns: Math.round(mat * 2),
-    bellyFins: Math.round(mat * 2),
-    finStyle: mat > 0.5 ? "forked" : "fan",
-    eyeR: 0.30 - mat * 0.13,                     // gros yeux quand bébé
-    bodyH: 1 - mat * 0.32,                        // bébés tout ronds
-    phase: rnd(0, 10), wiggle: rnd(0.9, 1.6) + (1 - mat) * 0.5,
-    turn: 0, nextTurn: 0, scale: 0.1, blink: 0,
+    heading: rnd(0, Math.PI * 2), speed: rnd(1.1, 2.4) + (baby ? 1 : 0),
+    size, grow: baby ? 0.14 : 0.18, baby, img, g,
+    spots: g ? Array.from({ length: g.spotN }, () => [rnd(-0.55, 0.7), rnd(-0.5, 0.5)]) : null,
+    angle: 0, mode: "swim", alpha: 1,
+    age: 0, life: img ? Infinity : rnd(48000, 95000), mateCd: baby ? 11000 : 3500,
+    phase: rnd(0, 10), wiggle: rnd(0.9, 1.5) + (baby ? 0.5 : 0),
+    turn: 0, nextTurn: 0, blink: 0,
   });
   if (fish.length > MAX) fish.shift();
 }
 
-function bodyPath(s, h) {
-  ctx.beginPath();
-  ctx.moveTo(s, 0);
-  ctx.quadraticCurveTo(s * 0.3, -s * 0.78 * h, -s * 0.78, -s * 0.18 - s * 0.0);
-  ctx.quadraticCurveTo(-s * 1.02, 0, -s * 0.78, s * 0.18);
-  ctx.quadraticCurveTo(s * 0.3, s * 0.78 * h, s, 0);
-  ctx.closePath();
-}
-
+// ===== dessin d'un poisson (fausse 3D : dégradés + foreshortening) =====
 function drawFish(f, t) {
-  const s = f.size;
+  const s = f.size * f.grow;
   const facingLeft = Math.cos(f.angle) < 0;
   const wig = Math.sin(t * 0.006 * f.speed + f.phase) * f.wiggle;
   ctx.save();
+  ctx.globalAlpha = f.alpha;
   ctx.translate(f.x, f.y);
   ctx.rotate(f.angle);
   if (facingLeft) ctx.scale(1, -1);
-  ctx.scale(f.scale, f.scale);
+  const yaw = 0.84 + 0.16 * Math.sin(t * 0.0026 + f.phase); // le corps tourne dans la profondeur
+  ctx.scale(yaw, 1);
 
-  if (f.img) {                       // poisson dessiné par l'utilisateur
-    const iw = f.img.width, ih = f.img.height;
-    const k = (s * 2.6) / Math.max(iw, ih);
+  if (f.img) {
+    const iw = f.img.width, ih = f.img.height, k = (s * 2.6) / Math.max(iw, ih);
     ctx.rotate(wig * 0.05);
     ctx.drawImage(f.img, -iw * k / 2, -ih * k / 2, iw * k, ih * k);
-    ctx.restore();
-    return;
+    ctx.restore(); return;
   }
 
-  const h = f.bodyH, hue = f.hue;
+  const g = f.g, hue = g.hue;
+  const { L, top, rear } = geo(s, g);
   const ty = wig * s * 0.45;
-  // palette volumétrique (lumière haut-gauche)
   const cLight = `hsl(${hue} 92% 74%)`, cMid = `hsl(${hue} 82% 55%)`, cDark = `hsl(${hue} 72% 32%)`;
   const cLine = `hsl(${hue} 70% 22%)`;
-  const finHue = (hue + 35) % 360;
-  const fg = ctx.createLinearGradient(-s * 0.6, -s, -s * 1.8, s);
-  fg.addColorStop(0, `hsl(${finHue} 88% 66%)`);
-  fg.addColorStop(1, `hsl(${finHue} 82% 36%)`);
-  const fin = (drawPath) => { ctx.fillStyle = fg; ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.035; ctx.lineJoin = "round"; drawPath(); ctx.fill(); ctx.stroke(); };
+  const fg = ctx.createLinearGradient(rear, -s, rear - s * 1.2, s);
+  fg.addColorStop(0, `hsl(${g.finHue} 88% 66%)`); fg.addColorStop(1, `hsl(${g.finHue} 82% 36%)`);
+  const fin = draw => { ctx.fillStyle = fg; ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.035; ctx.lineJoin = "round"; draw(); ctx.fill(); ctx.stroke(); };
+  const topEdge = x => -top * Math.sqrt(Math.max(0, 1 - (x / L) ** 2));
+  const E = s * 0.95;
 
-  // --- queue (derrière le corps) ---
+  // --- queue ---
   fin(() => {
-    ctx.beginPath();
-    ctx.moveTo(-s * 0.75, 0);
-    if (f.finStyle === "forked") {
-      ctx.quadraticCurveTo(-s * 1.5, ty - s * 0.7, -s * 1.75, ty - s * 0.55);
-      ctx.quadraticCurveTo(-s * 1.25, ty, -s * 1.75, ty + s * 0.55);
-      ctx.quadraticCurveTo(-s * 1.5, ty + s * 0.7, -s * 0.75, 0);
-    } else {
-      ctx.quadraticCurveTo(-s * 1.4, ty - s * 0.85, -s * 1.7, ty - s * 0.2);
-      ctx.quadraticCurveTo(-s * 1.85, ty, -s * 1.7, ty + s * 0.2);
-      ctx.quadraticCurveTo(-s * 1.4, ty + s * 0.85, -s * 0.75, 0);
+    ctx.beginPath(); ctx.moveTo(rear, 0);
+    if (g.tail === "forked") {
+      ctx.quadraticCurveTo(rear - 0.7 * E, ty - s * 0.7, rear - E, ty - s * 0.55);
+      ctx.quadraticCurveTo(rear - 0.45 * E, ty, rear - E, ty + s * 0.55);
+      ctx.quadraticCurveTo(rear - 0.7 * E, ty + s * 0.7, rear, 0);
+    } else if (g.tail === "fan") {
+      ctx.quadraticCurveTo(rear - 0.65 * E, ty - s * 0.9, rear - E, ty - s * 0.2);
+      ctx.quadraticCurveTo(rear - 1.05 * E, ty, rear - E, ty + s * 0.2);
+      ctx.quadraticCurveTo(rear - 0.65 * E, ty + s * 0.9, rear, 0);
+    } else if (g.tail === "round") {
+      ctx.quadraticCurveTo(rear - E, ty - s * 0.62, rear - E, ty);
+      ctx.quadraticCurveTo(rear - E, ty + s * 0.62, rear, 0);
+    } else { // pointy
+      ctx.lineTo(rear - E, ty - s * 0.12); ctx.lineTo(rear - E * 0.9, ty + s * 0.45); ctx.closePath();
     }
   });
 
-  // --- épines dorsales / nageoire dorsale ---
-  for (let i = 0; i < f.spikes; i++) {
-    const px = -s * 0.4 + (i / Math.max(1, f.spikes - 1)) * s * 0.8;
-    const ph = s * (0.45 - Math.abs(px) / s * 0.25) * h;
-    const top = -Math.sqrt(Math.max(0, 1 - (px / s) ** 2)) * s * 0.72 * h;
-    fin(() => { ctx.beginPath(); ctx.moveTo(px - s * 0.08, top + s * 0.05); ctx.lineTo(px, top - ph); ctx.lineTo(px + s * 0.08, top + s * 0.05); ctx.closePath(); });
+  // --- dorsale ---
+  if (g.dorsal === "spikes") {
+    for (let i = 0; i < g.spikes; i++) {
+      const x = -s * 0.35 + (i / Math.max(1, g.spikes - 1)) * s * 0.75;
+      const te = topEdge(x);
+      fin(() => { ctx.beginPath(); ctx.moveTo(x - s * 0.08, te + s * 0.05); ctx.lineTo(x, te - s * 0.45 * g.bodyH); ctx.lineTo(x + s * 0.08, te + s * 0.05); ctx.closePath(); });
+    }
+  } else if (g.dorsal === "sail") {
+    fin(() => { ctx.beginPath(); ctx.moveTo(rear * 0.55, topEdge(rear * 0.55)); ctx.quadraticCurveTo(0, topEdge(0) - top * 1.1 * g.sailH, L * 0.45, topEdge(L * 0.45)); ctx.closePath(); });
   }
-  if (!f.spikes) fin(() => { ctx.beginPath(); ctx.moveTo(-s * 0.25, -s * 0.5 * h); ctx.quadraticCurveTo(-s * 0.1, -s * 1.05 * h, s * 0.45, -s * 0.42 * h); ctx.closePath(); });
 
-  // --- corps : dégradé radial = volume 3D, ombre douce ---
-  const bg = ctx.createRadialGradient(s * 0.0, -s * 0.35 * h, s * 0.05, s * 0.0, 0, s * 1.35);
+  // --- corps : volume 3D + ombre ---
+  const bg = ctx.createRadialGradient(0, -top * 0.5, s * 0.05, 0, 0, L * 1.35);
   bg.addColorStop(0, cLight); bg.addColorStop(0.55, cMid); bg.addColorStop(1, cDark);
   ctx.save();
   ctx.shadowColor = "rgba(0,0,0,.4)"; ctx.shadowBlur = s * 0.5; ctx.shadowOffsetY = s * 0.14;
-  ctx.fillStyle = bg; bodyPath(s, h); ctx.fill();
+  ctx.fillStyle = bg; bodyPath(s, g); ctx.fill();
   ctx.restore();
-  ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.04; bodyPath(s, h); ctx.stroke();
+  ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.04; bodyPath(s, g); ctx.stroke();
 
-  // --- tout ce qui vit SUR le corps, découpé dedans ---
-  ctx.save(); bodyPath(s, h); ctx.clip();
-  // ventre clair dégradé
-  const blg = ctx.createLinearGradient(0, -s * 0.1, 0, s * 0.85);
+  // --- détails clippés dans le corps ---
+  ctx.save(); bodyPath(s, g); ctx.clip();
+  const blg = ctx.createLinearGradient(0, -top * 0.1, 0, top);
   blg.addColorStop(0, "rgba(255,255,255,0)"); blg.addColorStop(1, `hsl(${hue} 70% 90%)`);
-  ctx.fillStyle = blg; bodyPath(s, h); ctx.fill();
-  // motifs
-  if (f.pattern !== "plain") {
-    ctx.fillStyle = `hsl(${(hue + 170) % 360} 70% 45% / .55)`;
-    if (f.pattern === "stripes") {
-      for (let i = -1; i <= 2; i++) { ctx.beginPath(); ctx.ellipse(s * (0.1 - i * 0.4), 0, s * 0.12, s, 0, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = blg; bodyPath(s, g); ctx.fill();
+  if (g.pattern !== "plain") {
+    ctx.fillStyle = `hsl(${g.markHue} 70% 48% / .55)`;
+    if (g.pattern === "stripes") {
+      for (let i = -1; i <= 3; i++) { ctx.beginPath(); ctx.ellipse(L * (0.3 - i * 0.32), 0, s * 0.12, top * 1.6, 0, 0, Math.PI * 2); ctx.fill(); }
     } else {
-      for (const [sx, sy] of f.spots) { ctx.beginPath(); ctx.arc(s * sx, s * sy, s * 0.11, 0, Math.PI * 2); ctx.fill(); }
+      for (const [sx, sy] of f.spots) { ctx.beginPath(); ctx.arc(L * sx, top * sy, s * 0.11, 0, Math.PI * 2); ctx.fill(); }
     }
   }
-  // reflet spéculaire
-  ctx.fillStyle = "rgba(255,255,255,.3)";
-  ctx.beginPath(); ctx.ellipse(s * 0.18, -s * 0.34 * h, s * 0.5, s * 0.17, -0.35, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.32)"; // reflet spéculaire
+  ctx.beginPath(); ctx.ellipse(L * 0.15, -top * 0.5, L * 0.5, top * 0.22, -0.35, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 
-  // --- nageoire pectorale (devant le corps) + ventrales ---
-  fin(() => { ctx.beginPath(); ctx.moveTo(s * 0.15, s * 0.1); ctx.quadraticCurveTo(-s * 0.1, s * 0.6 + ty * 0.3, s * 0.45, s * 0.35); ctx.closePath(); });
-  for (let i = 0; i < f.bellyFins; i++) {
+  // --- nageoires avant + ventrales ---
+  fin(() => { ctx.beginPath(); ctx.moveTo(L * 0.15, top * 0.15); ctx.quadraticCurveTo(-s * 0.1, top * 0.85 + ty * 0.3, L * 0.45, top * 0.5); ctx.closePath(); });
+  for (let i = 0; i < g.bellyFins; i++) {
     const px = -s * 0.1 - i * s * 0.35;
-    fin(() => { ctx.beginPath(); ctx.moveTo(px, s * 0.2 * h); ctx.quadraticCurveTo(px - s * 0.1, s * 0.65 * h + ty * 0.2, px + s * 0.2, s * 0.45 * h); ctx.closePath(); });
+    fin(() => { ctx.beginPath(); ctx.moveTo(px, top * 0.3); ctx.quadraticCurveTo(px - s * 0.1, top * 0.95 + ty * 0.2, px + s * 0.2, top * 0.65); ctx.closePath(); });
+  }
+
+  // --- museau caractéristique ---
+  if (g.snout === "beak") {
+    fin(() => { ctx.beginPath(); ctx.moveTo(L * 0.92, -s * 0.06); ctx.lineTo(L * 1.18, 0); ctx.lineTo(L * 0.92, s * 0.12); ctx.closePath(); });
+  } else if (g.snout === "whiskers") {
+    ctx.strokeStyle = cLine; ctx.lineWidth = s * 0.04; ctx.lineCap = "round";
+    for (const d of [0, 1]) { ctx.beginPath(); ctx.moveTo(L * 0.85, s * 0.06); ctx.quadraticCurveTo(L * 1.1, s * (0.2 + d * 0.18), L * 1.25, s * (0.35 + d * 0.25)); ctx.stroke(); }
   }
 
   // --- cornes ---
-  ctx.strokeStyle = `hsl(${finHue} 80% 48%)`; ctx.lineWidth = s * 0.08; ctx.lineCap = "round";
-  for (let i = 0; i < f.horns; i++) {
-    const hx = s * (0.45 - i * 0.22);
-    ctx.beginPath(); ctx.moveTo(hx, -s * 0.45 * h); ctx.lineTo(hx + s * 0.05, -s * 0.8 * h); ctx.stroke();
+  ctx.strokeStyle = `hsl(${g.finHue} 80% 48%)`; ctx.lineWidth = s * 0.08; ctx.lineCap = "round";
+  for (let i = 0; i < g.horns; i++) {
+    const hx = L * (0.42 - i * 0.2);
+    ctx.beginPath(); ctx.moveTo(hx, topEdge(hx) + s * 0.05); ctx.lineTo(hx + s * 0.05, topEdge(hx) - s * 0.4); ctx.stroke();
   }
 
   // --- yeux (sphère brillante) ---
@@ -213,42 +260,47 @@ function drawFish(f, t) {
     eg.addColorStop(0, "#fff"); eg.addColorStop(1, "#cfd8e0");
     ctx.fillStyle = eg; ctx.beginPath(); ctx.arc(ex, ey, r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = cLine; ctx.lineWidth = r * 0.12; ctx.stroke();
-    if (blinking) {
-      ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = r * 0.3;
-      ctx.beginPath(); ctx.moveTo(ex - r, ey); ctx.lineTo(ex + r, ey); ctx.stroke();
-    } else {
+    if (blinking) { ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = r * 0.3; ctx.beginPath(); ctx.moveTo(ex - r, ey); ctx.lineTo(ex + r, ey); ctx.stroke(); }
+    else {
       ctx.fillStyle = "#0a0a14"; ctx.beginPath(); ctx.arc(ex + r * 0.15, ey, r * 0.5, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(ex + r * 0.32, ey - r * 0.32, r * 0.2, 0, Math.PI * 2); ctx.fill();
     }
   };
-  if (f.eyes === 2) {
+  const er = (f.baby ? 1.25 : 1) * g.eyeR * s; // bébés gros yeux
+  if (g.eyes === 2) {
     ctx.strokeStyle = cMid; ctx.lineWidth = s * 0.09; ctx.lineCap = "round";
-    for (const dx of [-0.1, 0.25]) {
-      ctx.beginPath(); ctx.moveTo(s * (0.3 + dx), -s * 0.35 * h); ctx.lineTo(s * (0.32 + dx), -s * 0.78 * h); ctx.stroke();
-      drawEye(s * (0.32 + dx), -s * 0.85 * h, s * f.eyeR * 0.8);
+    for (const dx of [-0.1, 0.22]) {
+      const sx = L * (0.4 + dx);
+      ctx.beginPath(); ctx.moveTo(sx, topEdge(sx) + s * 0.05); ctx.lineTo(sx, topEdge(sx) - s * 0.4); ctx.stroke();
+      drawEye(sx, topEdge(sx) - s * 0.45, er * 0.8);
     }
   } else {
-    drawEye(s * 0.55, -s * 0.2 * h, s * f.eyeR);
+    drawEye(L * 0.55, -top * 0.28, er);
   }
 
   // --- sourire ---
   ctx.strokeStyle = "#0a0a14"; ctx.lineWidth = s * 0.05; ctx.lineCap = "round";
-  ctx.beginPath(); ctx.arc(s * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3); ctx.stroke();
+  ctx.beginPath(); ctx.arc(L * 0.78, -s * 0.02, s * 0.16, 0.2, 1.3); ctx.stroke();
 
   ctx.restore();
 }
 
-// ===== physique : nage / attrapé / lancé =====
-function step(f, t) {
-  if (f.scale < 1) f.scale = Math.min(1, f.scale + 0.04);
+// ===== physique : nage / attrapé / lancé + âge =====
+function step(f, t, dt) {
+  f.grow += (1 - f.grow) * (f.baby ? 0.005 : 0.06); // les bébés grandissent
   f.blink = f.blink > 0 ? f.blink - 1 : (Math.random() < 0.004 ? 8 : 0);
-  const m = f.size * 1.2;
+  f.mateCd -= dt;
+  f.age += dt;
+  const left = f.life - f.age;
+  f.alpha = left < 5000 ? clamp(left / 5000, 0, 1) : 1; // vieux → s'estompe et part
+  const old = left < 5000;
+  const sEff = f.size * f.grow;
+  const m = sEff * 1.2;
 
   if (f.mode === "held") { f.angle = Math.atan2(f.vy, f.vx) || f.angle; return; }
 
   if (f.mode === "thrown") {
-    f.x += f.vx; f.y += f.vy;
-    f.vx *= 0.97; f.vy *= 0.97;                 // traînée
+    f.x += f.vx; f.y += f.vy; f.vx *= 0.97; f.vy *= 0.97;
     if (f.x < m && f.vx < 0) { f.x = m; f.vx *= -0.6; }
     if (f.x > cv.width - m && f.vx > 0) { f.x = cv.width - m; f.vx *= -0.6; }
     if (f.y < m && f.vy < 0) { f.y = m; f.vy *= -0.6; }
@@ -261,7 +313,8 @@ function step(f, t) {
   // nage : errance + lissage de vélocité
   if (t > f.nextTurn) { f.turn = rnd(-0.5, 0.5); f.nextTurn = t + rnd(400, 1400); }
   f.heading += f.turn * 0.01;
-  const dx = Math.cos(f.heading) * f.speed, dy = Math.sin(f.heading) * f.speed;
+  const spd = f.speed * (old ? 1.6 : 1); // les vieux accélèrent pour s'en aller
+  const dx = Math.cos(f.heading) * spd, dy = Math.sin(f.heading) * spd;
   f.vx += (dx - f.vx) * 0.04; f.vy += (dy - f.vy) * 0.04;
   f.x += f.vx; f.y += f.vy;
   if (f.x < m) { f.x = m; f.heading = Math.PI - f.heading; }
@@ -271,6 +324,27 @@ function step(f, t) {
   f.angle = Math.atan2(f.vy, f.vx);
 }
 
+// ===== reproduction : deux adultes qui se rencontrent font un bébé =====
+function fertile(f) {
+  return f.g && f.mode === "swim" && f.grow > 0.96 && f.mateCd <= 0 && f.age < f.life - 8000;
+}
+function breeding() {
+  if (fish.length >= MAX) return;
+  for (let i = 0; i < fish.length; i++) {
+    const a = fish[i]; if (!fertile(a)) continue;
+    for (let j = i + 1; j < fish.length; j++) {
+      const b = fish[j]; if (!fertile(b)) continue;
+      const reach = (a.size * a.grow + b.size * b.grow) * 0.85;
+      if (Math.hypot(a.x - b.x, a.y - b.y) > reach) continue;
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      spawn(mx, my, { genome: crossover(a.g, b.g), size: clamp((a.size + b.size) / 2 * rnd(0.85, 1.05), 18, 56), baby: true });
+      a.mateCd = b.mateCd = 13000;
+      hearts.push({ x: mx, y: my - 20, age: 0 });
+      return; // un seul couple par frame
+    }
+  }
+}
+
 // ===== feedback détection visages =====
 let faces = [];
 function drawFaces(t) {
@@ -278,30 +352,41 @@ function drawFaces(t) {
     const fc = faces[i];
     ctx.save();
     ctx.strokeStyle = fc.open ? "rgba(120,255,170,.55)" : "rgba(120,200,255,.3)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16);
-    else ctx.rect(fc.x, fc.y, fc.w, fc.h);
+    ctx.lineWidth = 2; ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16); else ctx.rect(fc.x, fc.y, fc.w, fc.h);
     ctx.stroke();
     ctx.fillStyle = fc.open ? "rgba(120,255,170,.9)" : "rgba(120,200,255,.7)";
-    ctx.font = "13px sans-serif";
-    ctx.fillText("Humain " + (i + 1), fc.x + 6, fc.y - 6);
-    // œuf en croissance dans la bouche
+    ctx.font = "13px sans-serif"; ctx.fillText("Humain " + (i + 1), fc.x + 6, fc.y - 6);
     if (fc.egg) {
       const r = fc.egg.r * (1 + Math.sin(t * 0.012) * 0.06);
-      ctx.fillStyle = "rgba(255,255,255,.22)";
-      ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(255,240,180,.85)"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,.22)"; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(255,240,180,.85)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.restore();
   }
 }
+function drawHearts(dt) {
+  for (let i = hearts.length - 1; i >= 0; i--) {
+    const h = hearts[i]; h.age += dt; h.y -= dt * 0.03;
+    if (h.age > 1500) { hearts.splice(i, 1); continue; }
+    ctx.save(); ctx.globalAlpha = 1 - h.age / 1500;
+    ctx.font = "24px sans-serif"; ctx.fillText("💞", h.x - 12, h.y);
+    ctx.restore();
+  }
+}
 
+let prevT = 0;
 function loop(t) {
+  const dt = prevT ? Math.min(64, t - prevT) : 16; prevT = t;
   ctx.clearRect(0, 0, cv.width, cv.height);
   drawFaces(t);
-  for (const f of fish) { step(f, t); drawFish(f, t); }
+  for (let i = fish.length - 1; i >= 0; i--) {
+    const f = fish[i];
+    step(f, t, dt); drawFish(f, t);
+    if (f.age > f.life) fish.splice(i, 1); // mort de vieillesse
+  }
+  breeding();
+  drawHearts(dt);
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
@@ -312,22 +397,20 @@ cv.addEventListener("pointerdown", e => {
   let best = null, bd = 1e9;
   for (const f of fish) {
     const d = Math.hypot(f.x - e.clientX, f.y - e.clientY);
-    if (d < f.size * 1.5 && d < bd) { bd = d; best = f; }
+    if (d < f.size * f.grow * 1.5 && d < bd) { bd = d; best = f; }
   }
   if (best) { grabbed = best; best.mode = "held"; best.vx = best.vy = 0; cv.classList.add("grabbing"); }
 });
 cv.addEventListener("pointermove", e => {
   if (!grabbed) return;
   grabbed.x = e.clientX; grabbed.y = e.clientY;
-  grabbed.vx = e.movementX; grabbed.vy = e.movementY;   // vitesse réelle du pointeur
+  grabbed.vx = e.movementX; grabbed.vy = e.movementY;
 });
 function drop() {
   if (!grabbed) return;
   const cap = 55;
-  grabbed.vx = Math.max(-cap, Math.min(cap, grabbed.vx));
-  grabbed.vy = Math.max(-cap, Math.min(cap, grabbed.vy));
-  grabbed.mode = "thrown";
-  grabbed = null; cv.classList.remove("grabbing");
+  grabbed.vx = clamp(grabbed.vx, -cap, cap); grabbed.vy = clamp(grabbed.vy, -cap, cap);
+  grabbed.mode = "thrown"; grabbed = null; cv.classList.remove("grabbing");
 }
 cv.addEventListener("pointerup", drop);
 cv.addEventListener("pointercancel", drop);
@@ -358,20 +441,19 @@ pad.addEventListener("pointermove", e => {
 addEventListener("pointerup", () => painting = false);
 document.getElementById("erase").onclick = () => erasing = true;
 document.getElementById("clear").onclick = () => pctx.clearRect(0, 0, pad.width, pad.height);
-document.getElementById("draw-btn").onclick = () => { modal.classList.add("on"); };
+document.getElementById("draw-btn").onclick = () => modal.classList.add("on");
 document.getElementById("cancel").onclick = () => modal.classList.remove("on");
 document.getElementById("release").onclick = () => {
   const img = new Image();
-  img.onload = () => spawn(rnd(cv.width * .3, cv.width * .7), rnd(cv.height * .3, cv.height * .7), img);
+  img.onload = () => spawn(rnd(cv.width * .3, cv.width * .7), rnd(cv.height * .3, cv.height * .7), { img });
   img.src = pad.toDataURL();
   pctx.clearRect(0, 0, pad.width, pad.height);
   modal.classList.remove("on");
 };
 
 // ===== détection bouche (2 visages) + couvaison =====
-// bouche ouverte = un œuf grossit (vite si grande ouverture) ; fermeture = éclosion.
 const wasOpen = [];
-const egg = [];      // {x,y,growth} par visage tant que la bouche est ouverte
+const egg = [];
 const GROW = 6, MAXR = 78;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
 mesh.setOptions({ maxNumFaces: 2, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
@@ -382,34 +464,29 @@ mesh.onResults(r => {
   faces = list.map((lm, i) => {
     let minX = 1, maxX = 0, minY = 1, maxY = 0;
     for (const p of lm) {
-      const sx = 1 - p.x;                       // miroir comme la vidéo
+      const sx = 1 - p.x;
       if (sx < minX) minX = sx; if (sx > maxX) maxX = sx;
       if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
     }
     const a = lm[13], b = lm[14], top = lm[10], bot = lm[152];
-    if (!a || !b || !top || !bot) { return { x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height, open: false, egg: null }; }
+    if (!a || !b || !top || !bot) return { x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height, open: false, egg: null };
     const ratio = Math.abs(a.y - b.y) / Math.abs(top.y - bot.y);
     const isOpen = ratio > 0.12;
     const mx = (1 - (a.x + b.x) / 2) * cv.width;
     const my = (a.y + b.y) / 2 * cv.height;
-
     if (isOpen) {
       if (!egg[i]) egg[i] = { x: mx, y: my, growth: 0 };
-      egg[i].growth += ratio;                   // plus la bouche est grande, plus ça grossit vite
-      egg[i].x = mx; egg[i].y = my;
-    } else if (wasOpen[i] && egg[i]) {          // éclosion
-      const size = Math.max(16, Math.min(MAXR, 16 + egg[i].growth * GROW));
-      spawn(egg[i].x, egg[i].y, { size, maturity: (size - 16) / (MAXR - 16) });
+      egg[i].growth += ratio; egg[i].x = mx; egg[i].y = my;
+    } else if (wasOpen[i] && egg[i]) {
+      const size = clamp(16 + egg[i].growth * GROW, 16, MAXR);
+      spawn(egg[i].x, egg[i].y, { size });
       egg[i] = null;
     }
     wasOpen[i] = isOpen;
-
     const er = egg[i] ? Math.min(MAXR, 16 + egg[i].growth * GROW) : 0;
     return {
-      x: minX * cv.width, y: minY * cv.height,
-      w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height,
-      open: isOpen,
-      egg: egg[i] ? { x: egg[i].x, y: egg[i].y, r: er } : null,
+      x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height,
+      open: isOpen, egg: egg[i] ? { x: egg[i].x, y: egg[i].y, r: er } : null,
     };
   });
   wasOpen.length = egg.length = list.length;
@@ -420,7 +497,6 @@ mesh.onResults(r => {
   const cam = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
   vid.srcObject = cam;
   await vid.play();
-  // .catch garde la boucle vivante même si une frame échoue
   (function pump() { mesh.send({ image: vid }).catch(() => {}).then(() => requestAnimationFrame(pump)); })();
 })();
 </script>
