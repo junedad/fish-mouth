@@ -456,7 +456,7 @@ const wasOpen = [];
 const egg = [];
 const GROW = 6, MAXR = 78;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
-mesh.setOptions({ maxNumFaces: 2, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+mesh.setOptions({ maxNumFaces: 4, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
 mesh.onResults(r => {
  try {
   const list = r.multiFaceLandmarks || [];
