@@ -95,8 +95,9 @@ function bodyPath(s, g) {
 }
 
 // ===== génome (héritable) =====
-function randomGenome() {
-  const hue = rnd(0, 360);
+// baseHue : gamme de couleur de l'humain qui l'a pondu (optionnel)
+function randomGenome(baseHue) {
+  const hue = baseHue == null ? rnd(0, 360) : (baseHue + rnd(-22, 22) + 360) % 360;
   return {
     hue, finHue: (hue + ri(20, 80)) % 360, markHue: (hue + ri(140, 200)) % 360,
     bodyShape: pick(["normal", "long", "round", "flat", "teardrop"]),
@@ -349,18 +350,18 @@ function breeding() {
 let faces = [];
 function drawFaces(t) {
   for (let i = 0; i < faces.length; i++) {
-    const fc = faces[i];
+    const fc = faces[i], H = fc.hue;
     ctx.save();
-    ctx.strokeStyle = fc.open ? "rgba(120,255,170,.55)" : "rgba(120,200,255,.3)";
-    ctx.lineWidth = 2; ctx.beginPath();
+    ctx.strokeStyle = `hsl(${H} 85% 60% / ${fc.open ? 0.85 : 0.4})`;
+    ctx.lineWidth = fc.open ? 3 : 2; ctx.beginPath();
     if (ctx.roundRect) ctx.roundRect(fc.x, fc.y, fc.w, fc.h, 16); else ctx.rect(fc.x, fc.y, fc.w, fc.h);
     ctx.stroke();
-    ctx.fillStyle = fc.open ? "rgba(120,255,170,.9)" : "rgba(120,200,255,.7)";
-    ctx.font = "13px sans-serif"; ctx.fillText("Humain " + (i + 1), fc.x + 6, fc.y - 6);
+    ctx.fillStyle = `hsl(${H} 85% 65%)`;
+    ctx.font = "13px sans-serif"; ctx.fillText("Humain " + fc.num, fc.x + 6, fc.y - 6);
     if (fc.egg) {
       const r = fc.egg.r * (1 + Math.sin(t * 0.012) * 0.06);
-      ctx.fillStyle = "rgba(255,255,255,.22)"; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = "rgba(255,240,180,.85)"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = `hsl(${H} 85% 70% / .28)`; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = `hsl(${H} 90% 65%)`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(fc.egg.x, fc.egg.y, r, 0, Math.PI * 2); ctx.stroke();
     }
     ctx.restore();
   }
@@ -451,45 +452,71 @@ document.getElementById("release").onclick = () => {
   modal.classList.remove("on");
 };
 
-// ===== détection bouche (2 visages) + couvaison =====
-const wasOpen = [];
-const egg = [];
-const GROW = 6, MAXR = 78;
+// ===== détection bouche (≤4 visages) avec identité + couleur persistantes =====
+// FaceMesh ne donne pas d'ID stable : on suit chaque humain par proximité du centroïde.
+const humans = [];           // {id, hue, cx, cy, wasOpen, egg, miss}
+let nextId = 0;
+const PALETTE = [8, 45, 130, 200, 280, 330, 95, 250]; // teintes bien distinctes
+const GROW = 6, MAXR = 78, MATCH = 0.22, FORGET = 30;
 const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
 mesh.setOptions({ maxNumFaces: 4, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
 mesh.onResults(r => {
  try {
   const list = r.multiFaceLandmarks || [];
   msg.style.display = list.length ? "none" : "block";
-  faces = list.map((lm, i) => {
+
+  // 1) détections brutes (coords miroir comme la vidéo)
+  const dets = list.map(lm => {
     let minX = 1, maxX = 0, minY = 1, maxY = 0;
     for (const p of lm) {
       const sx = 1 - p.x;
       if (sx < minX) minX = sx; if (sx > maxX) maxX = sx;
       if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
     }
-    const a = lm[13], b = lm[14], top = lm[10], bot = lm[152];
-    if (!a || !b || !top || !bot) return { x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height, open: false, egg: null };
-    const ratio = Math.abs(a.y - b.y) / Math.abs(top.y - bot.y);
-    const isOpen = ratio > 0.12;
-    const mx = (1 - (a.x + b.x) / 2) * cv.width;
-    const my = (a.y + b.y) / 2 * cv.height;
-    if (isOpen) {
-      if (!egg[i]) egg[i] = { x: mx, y: my, growth: 0 };
-      egg[i].growth += ratio; egg[i].x = mx; egg[i].y = my;
-    } else if (wasOpen[i] && egg[i]) {
-      const size = clamp(16 + egg[i].growth * GROW, 16, MAXR);
-      spawn(egg[i].x, egg[i].y, { size });
-      egg[i] = null;
-    }
-    wasOpen[i] = isOpen;
-    const er = egg[i] ? Math.min(MAXR, 16 + egg[i].growth * GROW) : 0;
+    const a = lm[13], b = lm[14], top = lm[10], bot = lm[152], valid = a && b && top && bot;
+    const ratio = valid ? Math.abs(a.y - b.y) / Math.abs(top.y - bot.y) : 0;
     return {
-      x: minX * cv.width, y: minY * cv.height, w: (maxX - minX) * cv.width, h: (maxY - minY) * cv.height,
-      open: isOpen, egg: egg[i] ? { x: egg[i].x, y: egg[i].y, r: er } : null,
+      minX, maxX, minY, maxY, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2,
+      ratio, isOpen: valid && ratio > 0.12,
+      mx: valid ? (1 - (a.x + b.x) / 2) * cv.width : 0, my: valid ? (a.y + b.y) / 2 * cv.height : 0,
     };
   });
-  wasOpen.length = egg.length = list.length;
+
+  // 2) appariement aux humains mémorisés (plus proche centroïde)
+  for (const h of humans) h.seen = false;
+  for (const d of dets) {
+    let best = null, bd = MATCH;
+    for (const h of humans) { if (h.seen) continue; const dist = Math.hypot(h.cx - d.cx, h.cy - d.cy); if (dist < bd) { bd = dist; best = h; } }
+    if (!best) { const id = nextId++; best = { id, hue: PALETTE[id % PALETTE.length], wasOpen: false, egg: null }; humans.push(best); }
+    best.seen = true; best.miss = 0; best.cx = d.cx; best.cy = d.cy; d.h = best;
+
+    // 3) couvaison portée par l'humain → le poisson hérite de sa couleur
+    if (d.isOpen) {
+      if (!best.egg) best.egg = { x: d.mx, y: d.my, growth: 0 };
+      best.egg.growth += d.ratio; best.egg.x = d.mx; best.egg.y = d.my;
+    } else if (best.wasOpen && best.egg) {
+      const size = clamp(16 + best.egg.growth * GROW, 16, MAXR);
+      spawn(best.egg.x, best.egg.y, { size, genome: randomGenome(best.hue) });
+      best.egg = null;
+    }
+    best.wasOpen = d.isOpen;
+  }
+
+  // 4) oublie les humains absents trop longtemps (garde l'identité sur une brève perte)
+  for (let i = humans.length - 1; i >= 0; i--) {
+    if (humans[i].seen) continue;
+    if ((humans[i].miss = (humans[i].miss || 0) + 1) > FORGET) humans.splice(i, 1);
+  }
+
+  // 5) ce que la boucle de rendu affiche
+  faces = dets.map(d => {
+    const er = d.h.egg ? Math.min(MAXR, 16 + d.h.egg.growth * GROW) : 0;
+    return {
+      x: d.minX * cv.width, y: d.minY * cv.height, w: (d.maxX - d.minX) * cv.width, h: (d.maxY - d.minY) * cv.height,
+      open: d.isOpen, hue: d.h.hue, num: humans.indexOf(d.h) + 1,
+      egg: d.h.egg ? { x: d.h.egg.x, y: d.h.egg.y, r: er } : null,
+    };
+  });
  } catch (e) { console.warn("onResults", e); }
 });
 
