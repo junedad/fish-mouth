@@ -1,0 +1,108 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Poissons & bouche</title>
+<style>
+  body { margin: 0; background: #02141f; overflow: hidden; font-family: sans-serif; }
+  #wrap { position: fixed; inset: 0; }
+  video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  video { transform: scaleX(-1); opacity: .35; }
+  #msg { position: fixed; top: 12px; left: 12px; color: #fff; background: #0008; padding: 8px 12px; border-radius: 8px; }
+</style>
+<div id="wrap">
+  <video id="vid" autoplay playsinline muted></video>
+  <canvas id="cv"></canvas>
+</div>
+<div id="msg">Ouvre la bouche…</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<script>
+const vid = document.getElementById("vid");
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const msg = document.getElementById("msg");
+const fish = [];
+
+function resize() { cv.width = innerWidth; cv.height = innerHeight; }
+addEventListener("resize", resize); resize();
+
+function spawn(x, y) {
+  const hue = Math.random() * 360;
+  fish.push({
+    x, y,
+    vx: (Math.random() - .5) * 3 - 1.5,        // dérive vers la gauche
+    vy: (Math.random() - .5) * 2,
+    size: 18 + Math.random() * 30,
+    color: `hsl(${hue} 80% 60%)`,
+    fins: 0.4 + Math.random() * 0.5,           // forme aléatoire (longueur queue)
+    body: 0.5 + Math.random() * 0.6,           // rondeur aléatoire
+    life: 1,
+  });
+}
+
+function drawFish(f) {
+  ctx.save();
+  ctx.translate(f.x, f.y);
+  ctx.rotate(Math.atan2(f.vy, f.vx) + (f.vx < 0 ? Math.PI : 0));
+  ctx.scale(f.vx < 0 ? -1 : 1, 1);
+  ctx.globalAlpha = Math.min(1, f.life);
+  ctx.fillStyle = f.color;
+  // corps
+  ctx.beginPath();
+  ctx.ellipse(0, 0, f.size, f.size * f.body, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // queue
+  ctx.beginPath();
+  ctx.moveTo(-f.size, 0);
+  ctx.lineTo(-f.size * (1 + f.fins), -f.size * f.fins);
+  ctx.lineTo(-f.size * (1 + f.fins), f.size * f.fins);
+  ctx.closePath();
+  ctx.fill();
+  // œil
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(f.size * .5, -f.size * .2, f.size * .12, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#000";
+  ctx.beginPath(); ctx.arc(f.size * .55, -f.size * .2, f.size * .06, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function loop() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  for (let i = fish.length - 1; i >= 0; i--) {
+    const f = fish[i];
+    f.x += f.vx; f.y += f.vy;
+    f.life -= 0.004;
+    if (f.life <= 0 || f.x < -100 || f.x > cv.width + 100) { fish.splice(i, 1); continue; }
+    drawFish(f);
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+
+// --- détection bouche ---
+let cooldown = 0;
+const mesh = new FaceMesh({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}` });
+mesh.setOptions({ maxNumFaces: 1, refineLandmarks: false, minDetectionConfidence: .5, minTrackingConfidence: .5 });
+mesh.onResults(r => {
+  cooldown--;
+  if (!r.multiFaceLandmarks?.length) return;
+  const lm = r.multiFaceLandmarks[0];
+  // ouverture = distance lèvres / hauteur du visage (normalise selon la distance caméra)
+  const open = Math.abs(lm[13].y - lm[14].y);
+  const faceH = Math.abs(lm[10].y - lm[152].y);
+  msg.style.display = "none";
+  if (open / faceH > 0.12 && cooldown <= 0) {
+    // bouche à l'écran (miroir horizontal comme la vidéo)
+    const mx = (1 - (lm[13].x + lm[14].x) / 2) * cv.width;
+    const my = (lm[13].y + lm[14].y) / 2 * cv.height;
+    for (let k = 0; k < 3; k++) spawn(mx, my);
+    cooldown = 6; // évite un flot continu tant que la bouche reste ouverte
+  }
+});
+
+(async () => {
+  const cam = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+  vid.srcObject = cam;
+  await vid.play();
+  (function pump() { mesh.send({ image: vid }).then(() => requestAnimationFrame(pump)); })();
+})();
+</script>
