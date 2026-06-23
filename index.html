@@ -18,7 +18,7 @@
   <canvas id="three"></canvas>
   <canvas id="hud"></canvas>
 </div>
-<div id="msg">Ouvre la bouche pour pondre une créature 3D… attrape-les, et laisse-les se rencontrer 💞</div>
+<div id="msg">Ouvre la bouche pour pondre une créature 3D · attrape-les à la souris · clique dans l'eau pour nourrir 🍤 · laisse-les se rencontrer 💞</div>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
 <script type="module">
@@ -40,24 +40,48 @@ const blend = (a, b, m) => a + (b - a) * rnd(0.35, 0.65) + rnd(-m, m);
 // ===================== Three.js : scène / caméra / lumières =====================
 const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("three"), alpha: true, antialias: true });
 renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x02141f, 70, 150); // profondeur
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 400);
 camera.position.set(0, 0, 72);
 
-scene.add(new THREE.AmbientLight(0x556677, 1.1));
-const key = new THREE.DirectionalLight(0xffffff, 1.0); key.position.set(-30, 50, 60); scene.add(key);
-const rim = new THREE.DirectionalLight(0x66ccff, 0.5); rim.position.set(40, -20, -30); scene.add(rim);
+scene.add(new THREE.HemisphereLight(0x9cc6ff, 0x132028, 0.9)); // ciel/fond
+scene.add(new THREE.AmbientLight(0x556677, 0.4));
+const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(-30, 55, 50);
+key.castShadow = true; key.shadow.mapSize.set(1024, 1024);
+key.shadow.camera.near = 10; key.shadow.camera.far = 180;
+key.shadow.camera.left = -70; key.shadow.camera.right = 70; key.shadow.camera.top = 70; key.shadow.camera.bottom = -70;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x66ccff, 0.6); rim.position.set(40, -20, -30); scene.add(rim);
 
 let bounds = new THREE.Vector3();
+let floor, bubbles, bgeo; const BN = 130;
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h); hud.width = w; hud.height = h;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   const halfH = Math.tan(camera.fov * Math.PI / 360) * camera.position.z;
   bounds.set(halfH * camera.aspect * 0.86, halfH * 0.86, 22); // demi-volume nageable
+  if (floor) floor.position.y = -bounds.y - 6;
 }
 addEventListener("resize", resize); resize();
+
+// sol invisible qui reçoit les ombres → profondeur
+floor = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), new THREE.ShadowMaterial({ opacity: 0.28 }));
+floor.rotation.x = -Math.PI / 2; floor.position.y = -bounds.y - 6; floor.receiveShadow = true; scene.add(floor);
+
+// bulles qui montent
+bgeo = new THREE.BufferGeometry();
+const bpos = new Float32Array(BN * 3);
+for (let i = 0; i < BN; i++) { bpos[i * 3] = rnd(-bounds.x, bounds.x); bpos[i * 3 + 1] = rnd(-bounds.y, bounds.y); bpos[i * 3 + 2] = rnd(-bounds.z, bounds.z); }
+bgeo.setAttribute("position", new THREE.BufferAttribute(bpos, 3));
+bubbles = new THREE.Points(bgeo, new THREE.PointsMaterial({ color: 0xbfe6ff, size: 0.5, transparent: true, opacity: 0.45, depthWrite: false }));
+scene.add(bubbles);
 
 // projette un point écran (px) sur le plan z=0 du monde
 function screenToWorld(px, py) {
@@ -142,7 +166,7 @@ function buildCreature(g, S) {
   mats.push(bodyMat, finMat, hornMat, whiteMat, darkMat);
 
   // corps
-  const body = new THREE.Mesh(SPHERE, bodyMat); body.scale.set(dx, dy, dz); group.add(body);
+  const body = new THREE.Mesh(SPHERE, bodyMat); body.scale.set(dx, dy, dz); body.castShadow = true; group.add(body);
 
   const fin = (geo, mat = finMat) => new THREE.Mesh(geo, mat);
 
@@ -223,6 +247,14 @@ function buildCreature(g, S) {
 // ===================== créatures : naissance / physique / vie =====================
 const creatures = [];
 const hearts = [];
+const pellets = [];
+const PELLET_GEO = new THREE.SphereGeometry(0.5, 8, 8);
+const PELLET_MAT = new THREE.MeshStandardMaterial({ color: 0xffd23f, emissive: 0x553300, roughness: 0.4 });
+function dropFood(e) {
+  const m = new THREE.Mesh(PELLET_GEO, PELLET_MAT);
+  m.position.copy(screenToWorld(e.clientX, e.clientY)); scene.add(m);
+  pellets.push({ mesh: m, vy: -2, eaten: false });
+}
 
 function spawnAt(pos, opts = {}) {
   const g = opts.genome || randomGenome();
@@ -245,10 +277,10 @@ function spawnAt(pos, opts = {}) {
   if (creatures.length > MAX) { const old = creatures.shift(); scene.remove(old.group); }
 }
 
-const tmp = new THREE.Vector3();
+const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
 function stepCreature(c, t, dt) {
   c.grow += (1 - c.grow) * (c.baby ? 0.4 : 2.5) * dt;
-  c.group.scale.setScalar(clamp(c.grow, 0.05, 1));
+  c.group.scale.setScalar(clamp(c.grow, 0.05, 1) * (c.mode === "held" ? 1.15 : 1));
   c.age += dt; c.mateCd -= dt;
   const left = c.life - c.age;
   c.alpha = left < 5 ? clamp(left / 5, 0, 1) : 1;
@@ -267,9 +299,27 @@ function stepCreature(c, t, dt) {
     pos.addScaledVector(c.vel, dt);
     c.vel.multiplyScalar(Math.pow(0.12, dt)); // traînée
   } else { // nage
-    if (t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.6, 0.6)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
+    // attirance vers la nourriture la plus proche
+    let fed = false;
+    if (pellets.length) {
+      let near = null, nd = 1e9;
+      for (const pl of pellets) { const dd = pos.distanceToSquared(pl.mesh.position); if (dd < nd) { nd = dd; near = pl; } }
+      if (near && nd < 42 * 42) {
+        tmp.copy(near.mesh.position).sub(pos);
+        if (tmp.length() < c.S * c.dz * 0.6 + 2) { near.eaten = true; c.grow = Math.min(1, c.grow + 0.04); }
+        else { c.wander.copy(tmp).normalize(); fed = true; }
+      }
+    }
+    if (!fed && t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.6, 0.6)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
     tmp.copy(c.wander).multiplyScalar(c.speed * (old ? 1.7 : 1));
     c.vel.lerp(tmp, clamp(dt * 1.5, 0, 1));
+    // séparation : éviter les chevauchements
+    for (const o of creatures) {
+      if (o === c) continue;
+      tmp2.subVectors(pos, o.group.position);
+      const rr = (c.S * c.dz + o.S * o.dz) * 0.55, d2 = tmp2.lengthSq();
+      if (d2 > 1e-4 && d2 < rr * rr) c.vel.addScaledVector(tmp2.normalize(), (rr - Math.sqrt(d2)) * 4 * dt);
+    }
     pos.addScaledVector(c.vel, dt);
   }
 
@@ -338,6 +388,18 @@ function animate() {
     if (c.age > c.life) { scene.remove(c.group); creatures.splice(i, 1); }
   }
   breeding();
+  // bulles qui montent
+  const a = bgeo.attributes.position.array;
+  for (let i = 0; i < BN; i++) {
+    a[i * 3 + 1] += dt * (2 + (i % 5)); a[i * 3] += Math.sin(t + i) * dt * 0.4;
+    if (a[i * 3 + 1] > bounds.y) { a[i * 3 + 1] = -bounds.y; a[i * 3] = rnd(-bounds.x, bounds.x); }
+  }
+  bgeo.attributes.position.needsUpdate = true;
+  // nourriture qui coule
+  for (let i = pellets.length - 1; i >= 0; i--) {
+    const pl = pellets[i]; pl.mesh.position.y += pl.vy * dt; pl.vy = Math.max(-6, pl.vy - dt * 2);
+    if (pl.eaten || pl.mesh.position.y < -bounds.y) { scene.remove(pl.mesh); pellets.splice(i, 1); }
+  }
   drawHUD(t, dt);
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
@@ -355,7 +417,7 @@ function creatureOf(obj) { while (obj) { const c = creatures.find(c => c.group =
 three.addEventListener("pointerdown", e => {
   raycaster.setFromCamera(ndc(e), camera);
   const hit = raycaster.intersectObjects(creatures.map(c => c.group), true)[0];
-  if (!hit) return;
+  if (!hit) { dropFood(e); return; }
   const c = creatureOf(hit.object); if (!c) return;
   grabbed = c; c.mode = "held"; c.vel.set(0, 0, 0); three.classList.add("grabbing");
   camera.getWorldDirection(dragPlane.normal); dragPlane.setFromNormalAndCoplanarPoint(dragPlane.normal, c.group.position);
@@ -398,19 +460,23 @@ mesh.onResults(r => {
     for (const h of humans) { if (h.seen) continue; const dist = Math.hypot(h.cx - d.cx, h.cy - d.cy); if (dist < bd) { bd = dist; best = h; } }
     if (!best) { const id = nextId++; best = { id, hue: PALETTE[id % PALETTE.length], wasOpen: false, egg: null }; humans.push(best); }
     best.seen = true; best.miss = 0; best.cx = d.cx; best.cy = d.cy; d.h = best;
-    if (d.isOpen) { if (!best.egg) best.egg = { x: d.mx, y: d.my, growth: 0 }; best.egg.growth += d.ratio; best.egg.x = d.mx; best.egg.y = d.my; }
+    // lissage temporel + hystérésis (ouvre >0.15, ferme <0.09) → pas de flicker
+    best.sm = best.sm == null ? d.ratio : best.sm * 0.5 + d.ratio * 0.5;
+    const open = best.wasOpen ? best.sm > 0.09 : best.sm > 0.15;
+    d.open = open;
+    if (open) { if (!best.egg) best.egg = { x: d.mx, y: d.my, growth: 0 }; best.egg.growth += d.ratio; best.egg.x = d.mx; best.egg.y = d.my; }
     else if (best.wasOpen && best.egg) {
       const size = clamp(16 + best.egg.growth * GROW, 16, MAXR);
       spawnAt(screenToWorld(best.egg.x, best.egg.y), { size, genome: randomGenome(best.hue) });
       best.egg = null;
     }
-    best.wasOpen = d.isOpen;
+    best.wasOpen = open;
   }
   for (let i = humans.length - 1; i >= 0; i--) { if (humans[i].seen) continue; if ((humans[i].miss = (humans[i].miss || 0) + 1) > FORGET) humans.splice(i, 1); }
   faces = dets.map(d => {
     const er = d.h.egg ? Math.min(MAXR, 16 + d.h.egg.growth * GROW) : 0;
     return { x: d.minX * innerWidth, y: d.minY * innerHeight, w: (d.maxX - d.minX) * innerWidth, h: (d.maxY - d.minY) * innerHeight,
-      open: d.isOpen, hue: d.h.hue, num: humans.indexOf(d.h) + 1, egg: d.h.egg ? { x: d.h.egg.x, y: d.h.egg.y, r: er } : null };
+      open: d.open, hue: d.h.hue, num: humans.indexOf(d.h) + 1, egg: d.h.egg ? { x: d.h.egg.x, y: d.h.egg.y, r: er } : null };
   });
  } catch (e) { console.warn("onResults", e); }
 });
