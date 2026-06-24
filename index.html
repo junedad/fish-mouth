@@ -60,7 +60,7 @@ function resize() {
   renderer.setSize(w, h); hud.width = w; hud.height = h;
   camera.aspect = w / h; camera.updateProjectionMatrix();
   const halfH = Math.tan(camera.fov * Math.PI / 360) * camera.position.z;
-  bounds.set(halfH * camera.aspect * 0.86, halfH * 0.86, 22); // demi-volume nageable
+  bounds.set(halfH * camera.aspect * 0.86, halfH * 0.86, 34); // demi-volume nageable (Z = profondeur)
 }
 addEventListener("resize", resize); resize();
 
@@ -258,7 +258,7 @@ function buildPlant(x, z) {
   group.position.set(x, -bounds.y, z); scene.add(group);
   plants.push({ group, blades, health: 1 });
 }
-for (let i = 0; i < 5; i++) buildPlant(rnd(-bounds.x * 0.8, bounds.x * 0.8), rnd(-bounds.z * 0.6, bounds.z * 0.6));
+for (let i = 0; i < 12; i++) buildPlant(rnd(-bounds.x * 0.88, bounds.x * 0.88), rnd(-bounds.z * 0.8, bounds.z * 0.8));
 
 // ===================== créatures : naissance / physique / vie =====================
 const creatures = [];
@@ -285,6 +285,7 @@ function spawnAt(pos, opts = {}) {
   scene.add(built.group);
   creatures.push({
     ...built, g, S, baby, fullScale: 1, dead: false, hunting: false, hunger: rnd(0, 0.4),
+    health: 1, panic: 0, strikeCd: 0,
     grow: baby ? 0.14 : 0.2,
     vel: new THREE.Vector3(rnd(-4, 4), rnd(-4, 4), rnd(-2, 2)),
     wander: new THREE.Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).normalize(),
@@ -304,6 +305,8 @@ function stepCreature(c, t, dt) {
   c.alpha = left < 5 ? clamp(left / 5, 0, 1) : 1;
   if (c.alpha < 1) for (const m of c.mats) { m.transparent = true; m.opacity = c.alpha; }
   const old = left < 5, pred = c.g.diet === "predator", myLen = effLen(c);
+  c.strikeCd -= dt;
+  if (c.health < 1) c.health = Math.min(1, c.health + dt * 0.12); // cicatrise s'il échappe
 
   // animations
   c.tailPivot.rotation.y = Math.sin(t * 7 + c.phase) * 0.5 * c.wig;
@@ -323,7 +326,7 @@ function stepCreature(c, t, dt) {
     if (!pred) {
       let pr = null, pd = 1e9;
       for (const o of creatures) { if (o === c || o.dead || o.g.diet !== "predator" || effLen(o) < myLen * 1.1) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < pd) { pd = dd; pr = o; } }
-      if (pr && pd < 36 * 36) { tmp.copy(pos).sub(pr.group.position).normalize(); c.wander.copy(tmp); target = fleeing = true; }
+      if (pr && pd < 40 * 40) { tmp.copy(pos).sub(pr.group.position).normalize(); c.wander.copy(tmp); target = fleeing = true; }
     }
     // 2) prédateur affamé : chasse un plus petit, mais ÉPARGNE les bébés (grow < 0.55)
     if (!target && pred && c.hunger > 0.5) {
@@ -331,8 +334,13 @@ function stepCreature(c, t, dt) {
       for (const o of creatures) { if (o === c || o.dead || o.grow < 0.55 || effLen(o) > myLen * 0.82) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < nd) { nd = dd; prey = o; } }
       if (prey && nd < 46 * 46) {
         tmp.copy(prey.group.position).sub(pos); c.hunting = true; target = true;
-        if (tmp.length() < myLen * 0.6 + effLen(prey) * 0.5 + 1) { prey.dead = true; c.hunger = 0; c.fullScale = Math.min(2.5, c.fullScale * 1.08); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
-        else c.wander.copy(tmp).normalize();
+        if (tmp.length() < myLen * 0.6 + effLen(prey) * 0.5 + 1) {
+          if (c.strikeCd <= 0) { // morsure : pas de kill instantané, la proie peut s'échapper
+            c.strikeCd = 0.7; prey.health -= 0.5; prey.panic = t + 2.4;
+            if (prey.health <= 0) { prey.dead = true; c.hunger = 0; c.fullScale = Math.min(2.5, c.fullScale * 1.08); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
+            else hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💢" });
+          }
+        } else c.wander.copy(tmp).normalize();
       }
     }
     // 3) herbivore affamé : broute les plantes
@@ -347,13 +355,20 @@ function stepCreature(c, t, dt) {
       for (const pl of pellets) { const dd = pos.distanceToSquared(pl.mesh.position); if (dd < nd) { nd = dd; near = pl; } }
       if (near && nd < 44 * 44) { tmp.copy(near.mesh.position).sub(pos); target = true; if (tmp.length() < myLen * 0.6 + 2) { near.eaten = true; c.hunger = Math.max(0, c.hunger - 0.5); c.grow = Math.min(1, c.grow + 0.04); } else c.wander.copy(tmp).normalize(); }
     }
-    if (!target && t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.6, 0.6)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
+    if (!target && t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.9, 0.9)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
 
-    const sp = c.speed * (old ? 1.7 : 1) * (fleeing ? 1.8 : c.hunting ? 1.45 : 1);
+    const panicking = c.panic > t; // sursaut après une morsure
+    const sp = c.speed * (old ? 1.7 : 1) * (panicking ? 2.0 : fleeing ? 1.8 : c.hunting ? 1.45 : 1);
     tmp.copy(c.wander).multiplyScalar(sp);
     c.vel.lerp(tmp, clamp(dt * 1.5, 0, 1));
-    // séparation
-    for (const o of creatures) { if (o === c || o.dead) continue; tmp2.subVectors(pos, o.group.position); const rr = (myLen + effLen(o)) * 0.5, d2 = tmp2.lengthSq(); if (d2 > 1e-4 && d2 < rr * rr) c.vel.addScaledVector(tmp2.normalize(), (rr - Math.sqrt(d2)) * 4 * dt); }
+    // séparation — mais un prédateur ne s'écarte PAS de sa proie (sinon il ne l'atteint jamais)
+    for (const o of creatures) {
+      if (o === c || o.dead) continue;
+      if ((pred && effLen(o) <= myLen * 0.82) || (o.g.diet === "predator" && myLen <= effLen(o) * 0.82)) continue;
+      tmp2.subVectors(pos, o.group.position);
+      const rr = (myLen + effLen(o)) * 0.5, d2 = tmp2.lengthSq();
+      if (d2 > 1e-4 && d2 < rr * rr) c.vel.addScaledVector(tmp2.normalize(), (rr - Math.sqrt(d2)) * 4 * dt);
+    }
     pos.addScaledVector(c.vel, dt);
   }
 
