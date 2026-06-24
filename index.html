@@ -283,12 +283,12 @@ function spawnAt(pos, opts = {}) {
   const baby = !!opts.baby;
   const built = buildCreature(g, S);
   built.group.position.copy(pos);
-  built.group.scale.setScalar(baby ? 0.14 : 0.2);
+  built.group.scale.setScalar(0.1); // tout le monde naît petit puis grandit
   scene.add(built.group);
   creatures.push({
     ...built, g, S, baby, fullScale: 1, dead: false, hunting: false, hunger: rnd(0, 0.4),
     health: 1, panic: 0, strikeCd: 0, chase: 0, giveUp: 0,
-    grow: baby ? 0.14 : 0.2,
+    grow: 0.1,
     vel: new THREE.Vector3(rnd(-4, 4), rnd(-4, 4), rnd(-2, 2)),
     wander: new THREE.Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).normalize(),
     nextTurn: 0, speed: (g.diet === "predator" ? rnd(8, 12) : rnd(7, 13)) + (baby ? 4 : 0),
@@ -300,7 +300,7 @@ function spawnAt(pos, opts = {}) {
 
 const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3(), nose = new THREE.Vector3();
 function stepCreature(c, t, dt) {
-  c.grow += (1 - c.grow) * (c.baby ? 0.4 : 2.5) * dt;
+  c.grow += (1 - c.grow) * (c.baby ? 0.12 : 0.16) * dt; // croissance progressive (~15-20 s) → pas de géant instantané
   c.group.scale.setScalar(clamp(c.grow, 0.05, 1) * c.fullScale * (c.mode === "held" ? 1.15 : 1));
   c.age += dt; c.mateCd -= dt;
   const left = c.life - c.age;
