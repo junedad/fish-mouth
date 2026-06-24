@@ -83,7 +83,7 @@ const toScreen = v => { const p = v.clone().project(camera); return [(p.x * 0.5 
 // ===================== génome (héritable) =====================
 // nested {type,size} pour chaque partie → système de pièces modulaire façon Spore
 function randomGenome(baseHue, diet) {
-  diet = diet || (Math.random() < 0.5 ? "predator" : "herbivore");
+  diet = diet || (Math.random() < 0.62 ? "herbivore" : "predator"); // plus de proies que de prédateurs
   const pred = diet === "predator";
   const hue = baseHue == null ? rnd(0, 360) : (baseHue + rnd(-22, 22) + 360) % 360;
   return {
@@ -284,7 +284,7 @@ function spawnAt(pos, opts = {}) {
   built.group.scale.setScalar(baby ? 0.14 : 0.2);
   scene.add(built.group);
   creatures.push({
-    ...built, g, S, baby, fullScale: 1, dead: false, hunting: false,
+    ...built, g, S, baby, fullScale: 1, dead: false, hunting: false, hunger: rnd(0, 0.4),
     grow: baby ? 0.14 : 0.2,
     vel: new THREE.Vector3(rnd(-4, 4), rnd(-4, 4), rnd(-2, 2)),
     wander: new THREE.Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).normalize(),
@@ -315,35 +315,37 @@ function stepCreature(c, t, dt) {
 
   if (c.mode === "thrown") {
     pos.addScaledVector(c.vel, dt); c.vel.multiplyScalar(Math.pow(0.12, dt));
-  } else { // ===== nage : décision selon le régime =====
+  } else { // ===== nage : décisions selon régime + faim (besoin façon Sims) =====
+    c.hunger = Math.min(1, c.hunger + dt * 0.05);
     let target = false, fleeing = false; c.hunting = false;
 
-    // 1) proies : fuir un prédateur plus gros
+    // 1) proies : fuir un prédateur plus gros (réflexe, indépendant de la faim)
     if (!pred) {
       let pr = null, pd = 1e9;
       for (const o of creatures) { if (o === c || o.dead || o.g.diet !== "predator" || effLen(o) < myLen * 1.1) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < pd) { pd = dd; pr = o; } }
-      if (pr && pd < 34 * 34) { tmp.copy(pos).sub(pr.group.position).normalize(); c.wander.copy(tmp); target = fleeing = true; }
+      if (pr && pd < 36 * 36) { tmp.copy(pos).sub(pr.group.position).normalize(); c.wander.copy(tmp); target = fleeing = true; }
     }
-    // 2) chasse (prédateur) ou broutage (herbivore)
-    if (!target && pred) {
+    // 2) prédateur affamé : chasse un plus petit, mais ÉPARGNE les bébés (grow < 0.55)
+    if (!target && pred && c.hunger > 0.5) {
       let prey = null, nd = 1e9;
-      for (const o of creatures) { if (o === c || o.dead || effLen(o) > myLen * 0.82) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < nd) { nd = dd; prey = o; } }
-      if (prey && nd < 58 * 58) {
+      for (const o of creatures) { if (o === c || o.dead || o.grow < 0.55 || effLen(o) > myLen * 0.82) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < nd) { nd = dd; prey = o; } }
+      if (prey && nd < 46 * 46) {
         tmp.copy(prey.group.position).sub(pos); c.hunting = true; target = true;
-        if (tmp.length() < myLen * 0.6 + effLen(prey) * 0.5 + 1) { prey.dead = true; c.fullScale = Math.min(2.5, c.fullScale * 1.1); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
+        if (tmp.length() < myLen * 0.6 + effLen(prey) * 0.5 + 1) { prey.dead = true; c.hunger = 0; c.fullScale = Math.min(2.5, c.fullScale * 1.08); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
         else c.wander.copy(tmp).normalize();
       }
     }
-    if (!target && !pred && plants.length) {
+    // 3) herbivore affamé : broute les plantes
+    if (!target && !pred && c.hunger > 0.35 && plants.length) {
       let pl = null, nd = 1e9;
       for (const p of plants) { if (p.health < 0.2) continue; const dd = pos.distanceToSquared(p.group.position); if (dd < nd) { nd = dd; pl = p; } }
-      if (pl && nd < 62 * 62) { tmp.copy(pl.group.position).sub(pos); target = true; if (tmp.length() < myLen * 0.6 + 7) { pl.health = Math.max(0, pl.health - dt * 0.5); c.grow = Math.min(1, c.grow + dt * 0.06); } else c.wander.copy(tmp).normalize(); }
+      if (pl && nd < 64 * 64) { tmp.copy(pl.group.position).sub(pos); target = true; if (tmp.length() < myLen * 0.6 + 7) { pl.health = Math.max(0, pl.health - dt * 0.5); c.hunger = Math.max(0, c.hunger - dt * 0.6); c.grow = Math.min(1, c.grow + dt * 0.06); } else c.wander.copy(tmp).normalize(); }
     }
-    // 3) granulés (herbivores)
-    if (!target && !pred && pellets.length) {
+    // 4) granulés (herbivores affamés)
+    if (!target && !pred && c.hunger > 0.35 && pellets.length) {
       let near = null, nd = 1e9;
       for (const pl of pellets) { const dd = pos.distanceToSquared(pl.mesh.position); if (dd < nd) { nd = dd; near = pl; } }
-      if (near && nd < 42 * 42) { tmp.copy(near.mesh.position).sub(pos); target = true; if (tmp.length() < myLen * 0.6 + 2) { near.eaten = true; c.grow = Math.min(1, c.grow + 0.04); } else c.wander.copy(tmp).normalize(); }
+      if (near && nd < 44 * 44) { tmp.copy(near.mesh.position).sub(pos); target = true; if (tmp.length() < myLen * 0.6 + 2) { near.eaten = true; c.hunger = Math.max(0, c.hunger - 0.5); c.grow = Math.min(1, c.grow + 0.04); } else c.wander.copy(tmp).normalize(); }
     }
     if (!target && t > c.nextTurn) { c.wander.set(rnd(-1, 1), rnd(-1, 1), rnd(-0.6, 0.6)).normalize(); c.nextTurn = t + rnd(1.2, 3.5); }
 
