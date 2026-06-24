@@ -45,7 +45,8 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.15;
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0x02141f, 70, 150); // profondeur
-const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 400);
+// near/far resserrés (72 ± volume) → bien plus de précision de profondeur, supprime le z-fighting des nageoires
+const camera = new THREE.PerspectiveCamera(50, 1, 8, 220);
 camera.position.set(0, 0, 72);
 
 scene.add(new THREE.HemisphereLight(0x9cc6ff, 0x132028, 0.9)); // ciel/fond
@@ -223,7 +224,8 @@ function buildCreature(g, S) {
   const group = new THREE.Group();
   const M = {
     body: new THREE.MeshStandardMaterial({ map: bodyTexture(g), roughness: 0.5, metalness: 0.08 }),
-    fin: new THREE.MeshStandardMaterial({ color: new THREE.Color(`hsl(${g.finHue}, 80%, 56%)`), roughness: 0.45, side: THREE.DoubleSide }),
+    // polygonOffset : tire les nageoires plates vers la caméra → pas de z-fighting avec le corps
+    fin: new THREE.MeshStandardMaterial({ color: new THREE.Color(`hsl(${g.finHue}, 80%, 56%)`), roughness: 0.45, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }),
     horn: new THREE.MeshStandardMaterial({ color: new THREE.Color(`hsl(${g.finHue}, 80%, 44%)`), roughness: 0.5 }),
     white: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.25 }),
     dark: new THREE.MeshStandardMaterial({ color: 0x0a0a14, roughness: 0.3 }),
@@ -285,7 +287,7 @@ function spawnAt(pos, opts = {}) {
   scene.add(built.group);
   creatures.push({
     ...built, g, S, baby, fullScale: 1, dead: false, hunting: false, hunger: rnd(0, 0.4),
-    health: 1, panic: 0, strikeCd: 0,
+    health: 1, panic: 0, strikeCd: 0, chase: 0, giveUp: 0,
     grow: baby ? 0.14 : 0.2,
     vel: new THREE.Vector3(rnd(-4, 4), rnd(-4, 4), rnd(-2, 2)),
     wander: new THREE.Vector3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)).normalize(),
@@ -296,7 +298,7 @@ function spawnAt(pos, opts = {}) {
   if (creatures.length > MAX) { const o = creatures.shift(); scene.remove(o.group); }
 }
 
-const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+const tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3(), nose = new THREE.Vector3();
 function stepCreature(c, t, dt) {
   c.grow += (1 - c.grow) * (c.baby ? 0.4 : 2.5) * dt;
   c.group.scale.setScalar(clamp(c.grow, 0.05, 1) * c.fullScale * (c.mode === "held" ? 1.15 : 1));
@@ -306,7 +308,10 @@ function stepCreature(c, t, dt) {
   if (c.alpha < 1) for (const m of c.mats) { m.transparent = true; m.opacity = c.alpha; }
   const old = left < 5, pred = c.g.diet === "predator", myLen = effLen(c);
   c.strikeCd -= dt;
-  if (c.health < 1) c.health = Math.min(1, c.health + dt * 0.12); // cicatrise s'il échappe
+  const starving = pred && c.hunger > 0.92;          // prédateur affamé trop longtemps
+  if (c.health < 1 && !starving) c.health = Math.min(1, c.health + dt * 0.12); // cicatrise s'il échappe
+  if (starving) c.health -= dt * 0.08;               // famine → régule la population de prédateurs
+  if (c.health <= 0) c.dead = true;
 
   // animations
   c.tailPivot.rotation.y = Math.sin(t * 7 + c.phase) * 0.5 * c.wig;
@@ -326,23 +331,33 @@ function stepCreature(c, t, dt) {
     if (!pred) {
       let pr = null, pd = 1e9;
       for (const o of creatures) { if (o === c || o.dead || o.g.diet !== "predator" || effLen(o) < myLen * 1.1) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < pd) { pd = dd; pr = o; } }
-      if (pr && pd < 40 * 40) { tmp.copy(pos).sub(pr.group.position).normalize(); c.wander.copy(tmp); target = fleeing = true; }
-    }
-    // 2) prédateur affamé : chasse un plus petit, mais ÉPARGNE les bébés (grow < 0.55)
-    if (!target && pred && c.hunger > 0.5) {
-      let prey = null, nd = 1e9;
-      for (const o of creatures) { if (o === c || o.dead || o.grow < 0.55 || effLen(o) > myLen * 0.82) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < nd) { nd = dd; prey = o; } }
-      if (prey && nd < 46 * 46) {
-        tmp.copy(prey.group.position).sub(pos); c.hunting = true; target = true;
-        if (tmp.length() < myLen * 0.6 + effLen(prey) * 0.5 + 1) {
-          if (c.strikeCd <= 0) { // morsure : pas de kill instantané, la proie peut s'échapper
-            c.strikeCd = 0.7; prey.health -= 0.5; prey.panic = t + 2.4;
-            if (prey.health <= 0) { prey.dead = true; c.hunger = 0; c.fullScale = Math.min(2.5, c.fullScale * 1.08); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
-            else hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💢" });
-          }
-        } else c.wander.copy(tmp).normalize();
+      if (pr && pd < 40 * 40) {
+        tmp.copy(pos).sub(pr.group.position).normalize();
+        tmp.x += Math.sin(t * 5 + c.phase) * 0.45; tmp.y += Math.cos(t * 4 + c.phase) * 0.3; tmp.normalize(); // zigzag d'esquive
+        c.wander.copy(tmp); target = fleeing = true;
       }
     }
+    // 2) prédateur affamé : chasse un plus petit, ÉPARGNE les bébés, et a une ENDURANCE limitée
+    if (!target && pred && c.hunger > 0.5 && t > c.giveUp) {
+      let prey = null, nd = 1e9;
+      for (const o of creatures) { if (o === c || o.dead || o.grow < 0.55 || effLen(o) > myLen * 0.82) continue; const dd = pos.distanceToSquared(o.group.position); if (dd < nd) { nd = dd; prey = o; } }
+      if (prey && nd < 48 * 48) {
+        tmp.copy(prey.group.position).sub(pos); c.hunting = true; target = true;
+        c.chase += dt;
+        if (c.chase > 5.0) { c.giveUp = t + 3.0; c.chase = 0; c.hunting = false; target = false; } // abandonne → la proie s'en sort
+        else {
+          c.wander.copy(tmp).normalize();
+          // zone de touche = la GUEULE (nez à l'avant), pas le centre → la proie peut esquiver
+          nose.copy(c.vel).normalize().multiplyScalar(myLen * 0.7).add(pos);
+          const reach = effLen(prey) * 0.5 + myLen * 0.35 + 3.0;
+          if (c.strikeCd <= 0 && nose.distanceTo(prey.group.position) < reach) {
+            c.strikeCd = 0.7; prey.health -= 0.5; prey.panic = t + 2.4;
+            if (prey.health <= 0) { prey.dead = true; c.hunger = 0; c.chase = 0; c.fullScale = Math.min(2.5, c.fullScale * 1.08); hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💥" }); }
+            else hearts.push({ pos: prey.group.position.clone(), age: 0, emoji: "💢" });
+          }
+        }
+      } else c.chase = Math.max(0, c.chase - dt * 2);
+    } else if (pred) c.chase = Math.max(0, c.chase - dt * 2);
     // 3) herbivore affamé : broute les plantes
     if (!target && !pred && c.hunger > 0.35 && plants.length) {
       let pl = null, nd = 1e9;
